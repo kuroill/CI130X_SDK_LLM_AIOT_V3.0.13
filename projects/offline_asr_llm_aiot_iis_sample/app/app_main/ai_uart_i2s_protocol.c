@@ -16,6 +16,8 @@
 #include "status_share.h"
 #include "system_msg_deal.h"
 #include "user_config.h"
+#include "cias_audio_data_handle.h"
+#include "ci130x_dpmu.h"
 #include "ci_flash_data_info.h"
 
 #define AI_UART_PROTOCOL_VERSION 0x04
@@ -293,6 +295,36 @@ static void mark_peer_rx(void)
     }
 }
 
+static uint8_t persist_ota_mcu_status(uint8_t status)
+{
+    uint8_t persisted = 0;
+    uint16_t persisted_len = 0;
+
+    if(CINV_OPER_SUCCESS != write_ota_mcu_status(status))
+    {
+        mprintf("[OTA] boot flag write failed expected=%u\r\n", status);
+        return 0;
+    }
+    if(CINV_OPER_SUCCESS != cinv_item_read(
+        NVDATA_ID_OTA_MCU_STATUS,
+        sizeof(persisted),
+        &persisted,
+        &persisted_len))
+    {
+        mprintf("[OTA] boot flag readback failed expected=%u\r\n", status);
+        return 0;
+    }
+    if((sizeof(persisted) != persisted_len) || (persisted != status))
+    {
+        mprintf(
+            "[OTA] boot flag mismatch expected=%u actual=%u len=%u\r\n",
+            status, persisted, persisted_len);
+        return 0;
+    }
+    mprintf("[OTA] boot flag persisted value=%u\r\n", persisted);
+    return 1;
+}
+
 void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
 {
     mark_peer_rx();
@@ -344,8 +376,17 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
         send_state(AI_UART_STATE_WAKEUP_WAIT);
         break;
     case AI_UART_MSG_ENTER_OTA_MODE:
-        /* This audio trial uses the official FW_V2 layout, which has no OTA updater. */
-        send_ack(cmd->seq, AI_UART_ACK_UNSUPPORTED);
+        stop_downlink();
+        if(!persist_ota_mcu_status(5))
+        {
+            send_ack(cmd->seq, AI_UART_ACK_FAILED);
+            mprintf("[OTA] enter rejected reason=boot-flag-not-persisted\r\n");
+            break;
+        }
+        send_ack(cmd->seq, AI_UART_ACK_OK);
+        UartPollingSenddone((UART_TypeDef *)AI_UART_CONTROL_UART);
+        mprintf("[OTA] enter accepted; software reset into FW_V4 updater\r\n");
+        dpmu_software_reset_system_config();
         break;
     default:
         send_ack(cmd->seq, AI_UART_ACK_UNSUPPORTED);

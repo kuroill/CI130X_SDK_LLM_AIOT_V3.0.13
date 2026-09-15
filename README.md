@@ -24,7 +24,7 @@ CI130X SDK 适用于CI130X系列芯片
 
 ## Windows PowerShell 构建
 
-直接复用 `ci_audio` 使用的 Nuclei GCC 9.2，在 PowerShell 中依次执行：
+本 SDK 的官方预编译算法库由 Nuclei GCC 9.2.0 生成，必须使用同版本工具链。当前构建日志中的 `D:\Project\gcc\bin` 是 GCC 10.2.0，会在链接 LTO 算法库时报 `generated with GCC compiler older than 10.0`。确认 `D:\Project\gcc\bin` 已换成 GCC 9.2.0 后，在 PowerShell 中依次执行：
 
 ```powershell
 $env:PATH="D:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\tools\build-tools\bin;D:\Project\gcc\bin;$env:PATH"
