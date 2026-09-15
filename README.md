@@ -27,7 +27,7 @@ CI130X SDK 适用于CI130X系列芯片
 直接复用 `ci_audio` 使用的 Nuclei GCC 9.2，在 PowerShell 中依次执行：
 
 ```powershell
-$env:PATH="D:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\tools\build-tools\bin;D:\Project\nuclei-gcc-9.2.0\gcc\bin;$env:PATH"
+$env:PATH="D:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\tools\build-tools\bin;D:\Project\gcc\bin;$env:PATH"
 cd D:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\projects\offline_asr_llm_aiot_iis_sample\project_file
 make clean; make -r -j8
 ```
