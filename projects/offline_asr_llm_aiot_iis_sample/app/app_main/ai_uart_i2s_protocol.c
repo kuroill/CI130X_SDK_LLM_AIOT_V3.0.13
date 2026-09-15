@@ -366,12 +366,9 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
         }
         vol_set_from_esp_percent(requested_percent);
         send_ack(cmd->seq, AI_UART_ACK_OK);
-        mprintf("[AUDIO] runtime volume applied requestedPercent=%u promptRatioPercent=%u promptPcmGainPermille=%u persisted=false\r\n",
+        mprintf("[AUDIO] runtime volume applied requestedPercent=%u promptRatioPercent=60 promptPcmGainPermille=%u persisted=false\r\n",
             (unsigned int)requested_percent,
-            (unsigned int)LOCAL_PROMPT_VOLUME_RATIO_PERCENT,
-            ((unsigned int)requested_percent *
-                (unsigned int)ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR * 1000U) /
-                (unsigned int)ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR);
+            ((unsigned int)requested_percent * 12U) / 5U);
         break;
     }
     case AI_UART_MSG_ENTER_WAKEUP_WAIT:

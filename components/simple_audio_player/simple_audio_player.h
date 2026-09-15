@@ -6,9 +6,6 @@
 #include <stdbool.h>
 #include "ci130x_system.h"
 #define PCM_FRAME_SIZE          (512)
-#define LOCAL_PROMPT_VOLUME_RATIO_PERCENT 70U
-#define ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR 7U
-#define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 2500U
 typedef enum
 {
     SAP_DATA_SRC_FLASH,         /*!< 从FLASH读取源数据 */
