@@ -102,9 +102,6 @@ static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken);
 static int32_t g_audio_play_gain = VOLUME_OUTPUT_MAX_PERCENT;
 static volatile uint16_t g_audio_play_pcm_gain_percent = 50U;
 
-#define ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR 3
-#define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 1250
-
 #if (PLAYBACK_DAC_DIGITAL_GAIN_DB < -117) || (PLAYBACK_DAC_DIGITAL_GAIN_DB > 10)
 #error "PLAYBACK_DAC_DIGITAL_GAIN_DB must be in the CI1306 DAC range [-117, 10] dB"
 #endif
@@ -242,8 +239,8 @@ static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
 
     for(uint32_t i = 0; i < sample_count; i++)
     {
-        int32_t scaled = ((int32_t)pcm[i] * (int32_t)gain_percent *
-            ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR) / ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR;
+        int32_t scaled = ((int32_t)pcm[i] * (int32_t)gain_percent) /
+            LOCAL_PROMPT_PCM_SCALE_DENOMINATOR;
         if(scaled > 32767)
         {
             scaled = 32767;
