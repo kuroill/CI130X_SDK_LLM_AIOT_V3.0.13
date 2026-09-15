@@ -8,6 +8,7 @@
 #include "stream_buffer.h"
 #include "romlib_runtime.h"
 #include "codec_manager.h"
+#include "ci130x_codec.h"
 #include "ci_log_config.h"
 #include "ci_log.h"
 #include "board.h"
@@ -97,6 +98,16 @@ sap_src_type_t src_type; // 数据源类型
 static audio_play_state_t audio_play_state = AUDIO_PLAY_STATE_IDLE;
 static void task_simple_audio_player(void *pvParameters);
 static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken);
+
+static int32_t g_audio_play_gain = VOLUME_OUTPUT_MAX_PERCENT;
+static volatile uint16_t g_audio_play_pcm_gain_percent = 50U;
+
+#define ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR 3
+#define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 1250
+
+#if (PLAYBACK_DAC_DIGITAL_GAIN_DB < -117) || (PLAYBACK_DAC_DIGITAL_GAIN_DB > 10)
+#error "PLAYBACK_DAC_DIGITAL_GAIN_DB must be in the CI1306 DAC range [-117, 10] dB"
+#endif
 
 /**
  * @brief Initialize the simple audio player module.
@@ -189,7 +200,60 @@ void sap_stop()
  */
 void audio_play_set_vol_gain(int32_t gain)
 {
-    cm_set_codec_dac_gain(PLAY_CODEC_ID, 0, gain);
+    if(gain < 0)
+    {
+        gain = 0;
+    }
+    else if(gain > VOLUME_OUTPUT_MAX_PERCENT)
+    {
+        gain = VOLUME_OUTPUT_MAX_PERCENT;
+    }
+    g_audio_play_gain = gain;
+    audio_play_apply_output_gain();
+}
+
+void audio_play_apply_output_gain(void)
+{
+    cm_set_codec_dac_gain(PLAY_CODEC_ID, 0, g_audio_play_gain);
+    if(g_audio_play_gain > 0)
+    {
+        inner_codec_dac_dig_gain_set(PLAYBACK_DAC_DIGITAL_GAIN_DB);
+    }
+}
+
+void audio_play_set_pcm_gain_percent(uint16_t percent)
+{
+    if(percent < 1U)
+    {
+        percent = 1U;
+    }
+    else if(percent > 100U)
+    {
+        percent = 100U;
+    }
+    g_audio_play_pcm_gain_percent = percent;
+}
+
+static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
+{
+    uint16_t gain_percent = g_audio_play_pcm_gain_percent;
+    int16_t *pcm = (int16_t *)pcm_buf;
+    uint32_t sample_count = buf_size / sizeof(int16_t);
+
+    for(uint32_t i = 0; i < sample_count; i++)
+    {
+        int32_t scaled = ((int32_t)pcm[i] * (int32_t)gain_percent *
+            ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR) / ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR;
+        if(scaled > 32767)
+        {
+            scaled = 32767;
+        }
+        else if(scaled < -32768)
+        {
+            scaled = -32768;
+        }
+        pcm[i] = (int16_t)scaled;
+    }
 }
 
 /**
@@ -588,6 +652,9 @@ static int sap_decode_one_frame(void)
     {
         if (bytes_left >= 0)
         {
+            /* ESP scales streamed downlink PCM before I2S. Only local/simple-player
+             * decoded PCM uses the CI prompt ratio. */
+            audio_play_apply_local_pcm_gain((void *)pcm_buf, sap_info.frame_pcm_size);
             cm_write_codec(PLAY_CODEC_ID, (void *)pcm_buf, portMAX_DELAY);
         }
         else
@@ -603,6 +670,7 @@ static int sap_decode_one_frame(void)
         {
             cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
             cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
+            audio_play_apply_output_gain();
         }
         ret = 1;
     }

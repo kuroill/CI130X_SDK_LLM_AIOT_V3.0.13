@@ -600,6 +600,7 @@ void inner_codec_adc_enable(inner_codec_adc_config_t *ADC_Config);
 void inner_codec_adc_disable(inner_codec_cha_sel_t cha, inner_cedoc_gate_t EN);
 void inner_codec_dac_enable(bool is_first_enable);
 void inner_codec_dac_disable(void);
+void inner_codec_dac_dig_gain_set(int16_t dig_gain);
 void inner_codec_alc_disable(inner_codec_cha_sel_t cha);
 int inner_codec_alc_state(inner_codec_cha_sel_t cha);
 void inner_codec_adc_mode_set(inner_codec_mode_t mode,inner_codec_frame_1_2len_t frame_Len,

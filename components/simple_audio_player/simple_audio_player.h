@@ -134,6 +134,12 @@ void audio_play_hw_pa_da_ctl(FunctionalState cmd,bool is_control_pa);
  */
 void audio_play_set_vol_gain(int32_t gain);
 
+/** Reapply the current hardware and DAC digital gain after codec restart. */
+void audio_play_apply_output_gain(void);
+
+/** Set the ESP volume level used only for locally decoded prompt PCM. */
+void audio_play_set_pcm_gain_percent(uint16_t percent);
+
 /**
  * @brief 注册音频解码器宏
  */

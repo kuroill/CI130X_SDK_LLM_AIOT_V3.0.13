@@ -234,6 +234,7 @@ static void downlink_task(void *arg)
                     downlink_codec_started = 1;
                     cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
                     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
+                    audio_play_apply_output_gain();
                     ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING);
                 }
             }
@@ -272,6 +273,7 @@ static uint8_t start_downlink(void)
 
     downlink_bytes = 0;
     audio_play_hw_pa_da_ctl(ENABLE, true);
+    audio_play_apply_output_gain();
     downlink_enabled = 1;
     xSemaphoreGive(downlink_mutex);
     send_state(AI_UART_STATE_DOWNLINK_PLAYING);
@@ -287,6 +289,7 @@ static void mark_peer_rx(void)
     last_peer_tick = xTaskGetTickCount();
     if(!was_ready)
     {
+        audio_pre_rslt_start();
         if(i2s_rx_ready && !firmware_info_sent)
         {
             send_firmware_info();
@@ -361,8 +364,7 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
                 (unsigned int)requested_percent);
             break;
         }
-        /* The ESP owns persistence and scales streamed PCM. This controls local prompts only. */
-        audio_play_set_vol_gain(7 + (67 * requested_percent / 100));
+        vol_set_from_esp_percent(requested_percent);
         send_ack(cmd->seq, AI_UART_ACK_OK);
         mprintf("[AUDIO] runtime volume applied requestedPercent=%u promptRatioPercent=60 promptPcmGainPermille=%u persisted=false\r\n",
             (unsigned int)requested_percent,
@@ -508,6 +510,7 @@ static void heartbeat_task(void *arg)
         {
             peer_ready = 0;
             stop_downlink();
+            audio_pre_rslt_stop();
             current_state = AI_UART_STATE_WAKEUP_WAIT;
             mprintf("[AI_UART] peer timeout\r\n");
         }

@@ -445,6 +445,21 @@ void codec_output_ctl(int codec_index)
         return;
     }
     int cnt = cm_get_codec_busy_buffer_number(codec_index,CODEC_OUTPUT);
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+    if(PLAY_PRE_AUDIO_CODEC_ID == codec_index)
+    {
+        /* The NN/AEC producer is slightly slower than the fixed 16 kHz I2S clock.
+         * Prefill once, then keep TX running so short queue underruns become short
+         * zero gaps instead of repeated stop/rebuffer gaps seen by ESP VAD. */
+        if(!sg_init_tmp_str.codec_start_flag[codec_index] && (cnt > 10))
+        {
+            cm_start_codec(codec_index, CODEC_OUTPUT);
+            sg_init_tmp_str.codec_start_flag[codec_index] = true;
+            mprintf("[AI_I2S] continuous uplink started prefillFrames=%d\r\n", cnt);
+        }
+        return;
+    }
+#endif
     if (!sg_init_tmp_str.codec_start_flag[codec_index])
     {
         /*busy buffer 大于10帧再开启codec，否则会出现数据量不够的情况*/
@@ -566,14 +581,12 @@ void audio_debug_uart0_upload(int16_t *left, int16_t *right, ci_wrapfft_audio *p
 #if USE_AUDIO_UPLOAD_BY_IIS
 void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audio *p_wrapfft_audio)
 {
-    static uint32_t dropped_frames = 0;
     uint32_t write_pcm_addr = 0;
     uint32_t block_size = sg_init_tmp_str.init_str.block_size;
     int num = block_size / sizeof(int16_t) / 2;
 #if AI_UART_CONTROL_EN
     if(!ai_uart_i2s_peer_ready())
     {
-        codec_output_ctl(PLAY_PRE_AUDIO_CODEC_ID);
         return;
     }
 #endif
@@ -584,13 +597,7 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
         cm_get_pcm_buffer(PLAY_PRE_AUDIO_CODEC_ID, &write_pcm_addr, 0); // TODO HSL
         if (0 == write_pcm_addr)
         {
-            dropped_frames++;
             return;
-        }
-        if(dropped_frames)
-        {
-            mprintf("[AI_I2S] uplink resumed dropped=%u\r\n", (unsigned int)dropped_frames);
-            dropped_frames = 0;
         }
         int16_t *pcm_data_p = (int16_t *)write_pcm_addr;
         for (int i = 0; i < num; i++)
@@ -848,18 +855,15 @@ void audio_pre_rslt_write_data(int16_t *left, int16_t *right, uint32_t wrapfft_a
  */
 void audio_pre_rslt_stop(void)
 {
-#if USE_IIS1_OUT_PRE_RSLT_AUDIO || USE_HP_OUT_PRE_RSLT_AUDIO
-#else
-
 #if USE_IIS1_OUT_PRE_RSLT_AUDIO
     cm_stop_codec(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT);
+    sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] = false;
 #endif
 
 #if USE_HP_OUT_PRE_RSLT_AUDIO
     cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
 #endif
-#endif
-
+    sg_init_tmp_str.send_data_cnt = 0;
 }
 
 /**
@@ -868,18 +872,7 @@ void audio_pre_rslt_stop(void)
  */
 void audio_pre_rslt_start(void)
 {
-#if USE_IIS1_OUT_PRE_RSLT_AUDIO || USE_HP_OUT_PRE_RSLT_AUDIO
-
-#else
-
-#if USE_IIS1_OUT_PRE_RSLT_AUDIO
-    cm_start_codec(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT);
-#endif
-#if USE_HP_OUT_PRE_RSLT_AUDIO
-    cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
-#endif
-#endif
-
+    sg_init_tmp_str.send_data_cnt = 0;
 }
 
 /********** (C) COPYRIGHT Chipintelli Technology Co., Ltd. *****END OF FILE****/

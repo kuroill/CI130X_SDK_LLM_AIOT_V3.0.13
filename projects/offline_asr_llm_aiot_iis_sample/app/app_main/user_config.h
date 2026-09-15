@@ -249,7 +249,9 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
 #define PLAYER_CONTROL_PA               0   //是否有播放器控音频功放开关。0:功放常开,1:播放器在需要播放时才打开,但可能增加一点每一次播放的延迟时间
 #define VOLUME_MAX                      7   //设置音量调节的上限值，对应硬件支持的最大音量。
 #define VOLUME_MIN                      1   //设置音量调节的下限值，对应最小音量。
-#define VOLUME_DEFAULT                  5   //设置音量调节的默认值。
+#define VOLUME_DEFAULT                  VOLUME_MAX   //ESP同步前使用最大本地回退档位。
+#define VOLUME_OUTPUT_MAX_PERCENT       100 //硬件DAC固定满量程，实际用户音量由ESP PCM和本地提示音PCM控制。
+#define PLAYBACK_DAC_DIGITAL_GAIN_DB    10  //CI1306 DAC数字增益范围为-117..+10dB。
 #define WAKEUP_DING_VOICE_ID            1000
 
 #if AUDIO_PLAYER_ENABLE
