@@ -239,8 +239,8 @@ static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
 
     for(uint32_t i = 0; i < sample_count; i++)
     {
-        int32_t scaled = ((int32_t)pcm[i] * (int32_t)gain_percent) /
-            LOCAL_PROMPT_PCM_SCALE_DENOMINATOR;
+        int32_t scaled = ((int32_t)pcm[i] * (int32_t)gain_percent *
+            ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR) / ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR;
         if(scaled > 32767)
         {
             scaled = 32767;
