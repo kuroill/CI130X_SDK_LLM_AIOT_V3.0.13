@@ -241,7 +241,10 @@ static void downlink_task(void *arg)
                 sample_count = AUDIO_CAP_POINT_NUM_PER_FRM;
             }
             uint32_t output_addr = 0;
-            cm_get_pcm_buffer(PLAY_CODEC_ID, &output_addr, 10);
+            /* This custom UART/IIS owner has no retry path after consuming an
+             * RX frame, so preserve it with DAC back-pressure instead of a
+             * lossy timeout. */
+            cm_get_pcm_buffer(PLAY_CODEC_ID, &output_addr, portMAX_DELAY);
             if(output_addr)
             {
                 int16_t *output_pcm = (int16_t *)output_addr;
@@ -254,14 +257,6 @@ static void downlink_task(void *arg)
                 }
                 cm_write_codec(PLAY_CODEC_ID, (void *)output_addr, 0);
                 downlink_bytes += sample_count * sizeof(int16_t);
-                if(!downlink_codec_started)
-                {
-                    downlink_codec_started = 1;
-                    cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
-                    cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
-                    audio_play_apply_output_gain();
-                    ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING);
-                }
             }
             xSemaphoreGive(downlink_mutex);
         }
@@ -313,13 +308,20 @@ static uint8_t start_downlink(void)
     cm_config_codec(PLAY_CODEC_ID, CODEC_OUTPUT, &sound_info);
 
     downlink_bytes = 0;
+    downlink_codec_started = 1;
+    /* Arm the V3 AEC before the DAC can emit the first queued sample. */
+    ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING);
+    cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
+    cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
     audio_play_hw_pa_da_ctl(ENABLE, true);
+    /* Codec startup can restore its default DAC gain. Reapply the runtime
+     * volume before acknowledging that downlink playback is ready. */
     audio_play_apply_output_gain();
     downlink_enabled = 1;
     xSemaphoreGive(downlink_mutex);
     send_state(AI_UART_STATE_DOWNLINK_PLAYING);
     mprintf(
-        "[DOWNLINK] started owner=ai_uart wire=16000/16/stereo-duplicate dac=16000/16/mono pa=on\r\n");
+        "[DOWNLINK] started owner=ai_uart wire=16000/16/stereo-duplicate dac=16000/16/mono queue=blocking aec=armed pa=on\r\n");
     return 1;
 }
 
