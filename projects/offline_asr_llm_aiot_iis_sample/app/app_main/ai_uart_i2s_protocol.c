@@ -29,6 +29,7 @@
 #define AI_UART_PEER_TIMEOUT_MS 3000
 #define AI_PLAY_STOP_WAIT_MS 250
 #define AI_AEC_START_WARN_MS 500
+#define AI_DOWNLINK_PCM_BUFFER_COUNT 4
 #define AI_AEC_START_WARN_POLLS \
     ((AI_AEC_START_WARN_MS + AI_UART_TASK_POLL_MS - 1U) / AI_UART_TASK_POLL_MS)
 
@@ -66,6 +67,8 @@ static volatile TickType_t last_peer_tick;
 static uint8_t tx_seq;
 static uint32_t downlink_bytes;
 static volatile uint32_t dropped_commands;
+static uint8_t downlink_play_buffer[
+    AUDIO_CAP_POINT_NUM_PER_FRM * sizeof(int16_t) * AI_DOWNLINK_PCM_BUFFER_COUNT];
 
 static uint8_t wait_audio_play_idle(uint32_t wait_ms)
 {
@@ -231,18 +234,26 @@ static void downlink_task(void *arg)
                 xSemaphoreGive(downlink_mutex);
                 continue;
             }
-            uint32_t output_addr = 0;
-            const uint32_t frame_size = AUDIO_CAP_POINT_NUM_PER_FRM * 2U * sizeof(int16_t);
-            if(input_size > frame_size)
+            const int16_t *input_pcm = (const int16_t *)input_addr;
+            uint32_t sample_count = input_size / (2U * sizeof(int16_t));
+            if(sample_count > AUDIO_CAP_POINT_NUM_PER_FRM)
             {
-                input_size = frame_size;
+                sample_count = AUDIO_CAP_POINT_NUM_PER_FRM;
             }
+            uint32_t output_addr = 0;
             cm_get_pcm_buffer(PLAY_CODEC_ID, &output_addr, 10);
             if(output_addr)
             {
-                memcpy((void *)output_addr, (const void *)input_addr, input_size);
+                int16_t *output_pcm = (int16_t *)output_addr;
+                /* ESP sends the mono TTS duplicated into both physical IIS slots.
+                 * Feed one slot to the mono DAC, matching the validated ci_audio
+                 * path and keeping the AEC reference tied to the actual playback. */
+                for(uint32_t i = 0; i < sample_count; i++)
+                {
+                    output_pcm[i] = input_pcm[2U * i];
+                }
                 cm_write_codec(PLAY_CODEC_ID, (void *)output_addr, 0);
-                downlink_bytes += input_size;
+                downlink_bytes += sample_count * sizeof(int16_t);
                 if(!downlink_codec_started)
                 {
                     downlink_codec_started = 1;
@@ -259,6 +270,9 @@ static void downlink_task(void *arg)
 
 static uint8_t start_downlink(void)
 {
+    cm_pcm_buffer_info_t pcm_buffer_info = {0};
+    cm_sound_info_t sound_info = {0};
+
     xSemaphoreTake(downlink_mutex, portMAX_DELAY);
     if(downlink_enabled)
     {
@@ -282,8 +296,21 @@ static uint8_t start_downlink(void)
         }
     }
 
-    /* Restore the V3 SDK's IIS-to-DAC stereo buffer after local prompt playback. */
-    audio_pre_rslt_out_codec_init_pa_out();
+    /* Local prompts may leave PLAY_CODEC_ID configured for stereo. The ESP wire
+     * format stays stereo-duplicate, but the physical DAC/AEC path is mono. */
+    pcm_buffer_info.play_buffer_info.block_num = 1;
+    pcm_buffer_info.play_buffer_info.buffer_num = AI_DOWNLINK_PCM_BUFFER_COUNT;
+    pcm_buffer_info.play_buffer_info.block_size =
+        AUDIO_CAP_POINT_NUM_PER_FRM * sizeof(int16_t);
+    pcm_buffer_info.play_buffer_info.buffer_size =
+        pcm_buffer_info.play_buffer_info.block_size;
+    pcm_buffer_info.play_buffer_info.pcm_buffer = downlink_play_buffer;
+    cm_config_pcm_buffer(PLAY_CODEC_ID, CODEC_OUTPUT, &pcm_buffer_info);
+
+    sound_info.sample_rate = 16000;
+    sound_info.channel_flag = 1;
+    sound_info.sample_depth = IIS_DW_16BIT;
+    cm_config_codec(PLAY_CODEC_ID, CODEC_OUTPUT, &sound_info);
 
     downlink_bytes = 0;
     audio_play_hw_pa_da_ctl(ENABLE, true);
@@ -292,7 +319,7 @@ static uint8_t start_downlink(void)
     xSemaphoreGive(downlink_mutex);
     send_state(AI_UART_STATE_DOWNLINK_PLAYING);
     mprintf(
-        "[DOWNLINK] started owner=ai_uart format=16000/16/stereo-duplicate pa=on\r\n");
+        "[DOWNLINK] started owner=ai_uart wire=16000/16/stereo-duplicate dac=16000/16/mono pa=on\r\n");
     return 1;
 }
 

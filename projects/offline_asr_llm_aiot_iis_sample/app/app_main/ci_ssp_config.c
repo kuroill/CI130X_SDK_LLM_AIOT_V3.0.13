@@ -234,7 +234,9 @@ const aec_config_t aec_config =
 	.fft_size = 256,	   //频域处理频点数
 	/*AEC处理时使用的增益*/
 	.alc_off_codec_adc_gain_mic = 20,    //可调，单双麦都使用该增益
-    .alc_off_codec_adc_gain_ref = 4,     //可调,仅使用内部codec作参考回路时使用，外部codec需在es7243e_init函数中设置alc_cfg_str.max_gain值
+    /* Keep the single-ended SPK reference gain aligned with the validated
+     * ci_audio configuration; extra REF gain changes the echo-path ratio. */
+    .alc_off_codec_adc_gain_ref = 0,
 	.dtd_ratio = 1.0f,
 };
 
