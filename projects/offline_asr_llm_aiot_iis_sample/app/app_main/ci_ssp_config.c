@@ -230,9 +230,9 @@ const aec_config_t aec_config =
 	.nlp_flag = 2,
 	.aggr_mode = 1,
 	.fft_size = 256,	   //频域处理频点数
-	/*AEC处理时使用的增益：保持V3.0.13官方单麦AEC基线。*/
+	/*AEC处理时使用的增益：匹配当前CI-D06GT01D实板的既有REF前端。*/
 	.alc_off_codec_adc_gain_mic = 20,    //可调，单双麦都使用该增益
-    .alc_off_codec_adc_gain_ref = 4,     //可调,仅使用内部codec作参考回路时使用，外部codec需在es7243e_init函数中设置alc_cfg_str.max_gain值
+    .alc_off_codec_adc_gain_ref = 0,     //当前实板沿用已验证的0dB内部codec参考增益
 	.dtd_ratio = 1.0f,
 };
 

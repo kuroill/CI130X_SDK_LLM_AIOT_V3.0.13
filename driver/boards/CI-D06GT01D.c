@@ -446,11 +446,9 @@ const cm_codec_hw_info_t host_mic_hw_info =
     .codec_gain.dig_gain_l = 6.0f,//数字增益配置，该值加/减 1 ,数字增益加/减 1dB
 #endif 
 #if USE_AEC_MODULE
-#if (REF_DIFF_SINGLE == 0)
+    /* This product keeps the validated CI-D06GT01D analog REF circuit. Do not
+     * add the V3 generic single-ended +6 dB digital boost on the right ADC. */
     .codec_gain.dig_gain_r = 1.0f,
-#else
-    .codec_gain.dig_gain_r = 6.0f,
-#endif
 #else
 #if (MIC_DIFF_SINGLE == 0)
     .codec_gain.dig_gain_r = 1.0f,

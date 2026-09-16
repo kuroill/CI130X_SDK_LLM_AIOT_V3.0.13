@@ -579,11 +579,63 @@ void audio_debug_uart0_upload(int16_t *left, int16_t *right, ci_wrapfft_audio *p
 }
 #endif
 #if USE_AUDIO_UPLOAD_BY_IIS
+static void report_aec_path_levels(ci_wrapfft_audio *audio, uint32_t sample_count)
+{
+    static uint32_t playing_frames = 0;
+    if(CI_SS_PLAY_STATE_PLAYING != ciss_get(CI_SS_PLAY_STATE) ||
+       !ciss_get(CI_SS_AEC_WORK_STATE) ||
+       NULL == audio || NULL == audio->mic[0] || NULL == audio->ref[0] ||
+       NULL == audio->dst[0] || 0 == sample_count)
+    {
+        playing_frames = 0;
+        return;
+    }
+
+    playing_frames++;
+    if(0 != (playing_frames % 64U))
+    {
+        return;
+    }
+
+    uint64_t mic_abs_sum = 0;
+    uint64_t ref_abs_sum = 0;
+    uint64_t dst_abs_sum = 0;
+    uint32_t mic_peak = 0;
+    uint32_t ref_peak = 0;
+    uint32_t dst_peak = 0;
+    for(uint32_t i = 0; i < sample_count; i++)
+    {
+        uint32_t mic_abs = audio->mic[0][i] < 0 ?
+            (uint32_t)(-(int32_t)audio->mic[0][i]) : (uint32_t)audio->mic[0][i];
+        uint32_t ref_abs = audio->ref[0][i] < 0 ?
+            (uint32_t)(-(int32_t)audio->ref[0][i]) : (uint32_t)audio->ref[0][i];
+        uint32_t dst_abs = audio->dst[0][i] < 0 ?
+            (uint32_t)(-(int32_t)audio->dst[0][i]) : (uint32_t)audio->dst[0][i];
+        mic_abs_sum += mic_abs;
+        ref_abs_sum += ref_abs;
+        dst_abs_sum += dst_abs;
+        if(mic_abs > mic_peak) mic_peak = mic_abs;
+        if(ref_abs > ref_peak) ref_peak = ref_abs;
+        if(dst_abs > dst_peak) dst_peak = dst_abs;
+    }
+
+    mprintf(
+        "[AEC_PATH] micAbs=%u refAbs=%u dstAbs=%u micPeak=%u refPeak=%u dstPeak=%u dstToMicPermille=%u\r\n",
+        (unsigned int)(mic_abs_sum / sample_count),
+        (unsigned int)(ref_abs_sum / sample_count),
+        (unsigned int)(dst_abs_sum / sample_count),
+        (unsigned int)mic_peak,
+        (unsigned int)ref_peak,
+        (unsigned int)dst_peak,
+        (unsigned int)((dst_abs_sum * 1000U) / (mic_abs_sum ? mic_abs_sum : 1U)));
+}
+
 void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audio *p_wrapfft_audio)
 {
     uint32_t write_pcm_addr = 0;
     uint32_t block_size = sg_init_tmp_str.init_str.block_size;
     int num = block_size / sizeof(int16_t) / 2;
+    report_aec_path_levels(p_wrapfft_audio, (uint32_t)num);
 #if AI_UART_CONTROL_EN
     if(!ai_uart_i2s_peer_ready())
     {
