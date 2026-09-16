@@ -227,7 +227,9 @@ const aec_config_t aec_config =
 	.aec_control_mode = ENABLE_PLAYING_STATE_MODE,     //ENABLE_PLAYING_STATE_MODE:根据播报状态进行aec控制;  COMPUTE_REF_AMPL_MODE:根据参考幅值大小进行aec控制
 	.aec_gain = 1.0f,							       //增益数值
 	.aec_enable_threshold = 2000.0f,	               //参考信号判断门限值  
-	.nlp_flag = 2,
+	/* Cascade NLP mode 2 and mode 1 to suppress the residual playback echo
+	 * that otherwise survives long enough to satisfy the barge-in confirmer. */
+	.nlp_flag = 3,
 	.aggr_mode = 1,
 	.fft_size = 256,	   //频域处理频点数
 	/*AEC处理时使用的增益*/

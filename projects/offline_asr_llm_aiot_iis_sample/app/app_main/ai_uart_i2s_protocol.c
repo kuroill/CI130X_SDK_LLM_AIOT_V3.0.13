@@ -28,6 +28,9 @@
 #define AI_UART_HEARTBEAT_MS 1000
 #define AI_UART_PEER_TIMEOUT_MS 3000
 #define AI_PLAY_STOP_WAIT_MS 250
+#define AI_AEC_START_WARN_MS 500
+#define AI_AEC_START_WARN_POLLS \
+    ((AI_AEC_START_WARN_MS + AI_UART_TASK_POLL_MS - 1U) / AI_UART_TASK_POLL_MS)
 
 #define AI_UART_MSG_ACK 0x03
 #define AI_UART_MSG_PING 0x05
@@ -175,6 +178,7 @@ static void send_uplink_ready(void)
 static void stop_downlink(void)
 {
     uint8_t was_active;
+    uint8_t aec_tail_armed = 0;
     uint32_t stopped_bytes;
 
     xSemaphoreTake(downlink_mutex, portMAX_DELAY);
@@ -184,7 +188,14 @@ static void stop_downlink(void)
     {
         cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
         cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
-        ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_IDLE);
+        /* Let the AEC owner drain the acoustic/reference tail and restore ALC.
+         * Writing IDLE directly bypasses that cleanup and can leak the speaker
+         * tail into the next uplink while CI_SS_AEC_WORK_STATE stays stale. */
+        if(CI_SS_PLAY_STATE_PLAYING == ciss_get(CI_SS_PLAY_STATE))
+        {
+            ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING_TO_IDLE);
+            aec_tail_armed = 1;
+        }
         downlink_codec_started = 0;
     }
     stopped_bytes = downlink_bytes;
@@ -192,7 +203,10 @@ static void stop_downlink(void)
 
     if(was_active)
     {
-        mprintf("[DOWNLINK] stopped bytes=%u rx=drain pa=keep-on\r\n", (unsigned int)stopped_bytes);
+        mprintf(
+            "[DOWNLINK] stopped bytes=%u rx=drain pa=keep-on aec_tail=%u\r\n",
+            (unsigned int)stopped_bytes,
+            (unsigned int)aec_tail_armed);
     }
 }
 
@@ -493,6 +507,46 @@ void ai_uart_i2s_on_audio_ready(void)
     }
 }
 
+static void report_aec_runtime(void)
+{
+#if USE_AEC_MODULE
+    static uint8_t last_work_state = 0xff;
+    static uint16_t inactive_playing_polls;
+    uint8_t work_state = ciss_get(CI_SS_AEC_WORK_STATE) ? 1U : 0U;
+    status_t play_state = ciss_get(CI_SS_PLAY_STATE);
+
+    if(work_state != last_work_state)
+    {
+        last_work_state = work_state;
+        mprintf(
+            "[AEC] work_state=%u play_state=%u downlink=%u\r\n",
+            (unsigned int)work_state,
+            (unsigned int)play_state,
+            downlink_codec_started ? 1U : 0U);
+    }
+
+    if(downlink_codec_started &&
+       CI_SS_PLAY_STATE_PLAYING == play_state &&
+       !work_state)
+    {
+        if(inactive_playing_polls < AI_AEC_START_WARN_POLLS)
+        {
+            inactive_playing_polls++;
+            if(inactive_playing_polls == AI_AEC_START_WARN_POLLS)
+            {
+                mprintf(
+                    "[AEC] not_working while_playing duration_ms=%u check=ref_path_or_threshold\r\n",
+                    (unsigned int)AI_AEC_START_WARN_MS);
+            }
+        }
+    }
+    else
+    {
+        inactive_playing_polls = 0;
+    }
+#endif
+}
+
 static void heartbeat_task(void *arg)
 {
     TickType_t last_ping = 0;
@@ -520,6 +574,7 @@ static void heartbeat_task(void *arg)
             dropped_commands = 0;
             mprintf("[AI_UART] command queue overflow dropped=%u\r\n", (unsigned int)dropped);
         }
+        report_aec_runtime();
         vTaskDelay(pdMS_TO_TICKS(AI_UART_TASK_POLL_MS));
     }
 }
