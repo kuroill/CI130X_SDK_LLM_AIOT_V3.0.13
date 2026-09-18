@@ -80,7 +80,8 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
 #endif
 
 //输出识别中间结果使能
-#define ASR_MIDDLE_RESULT_OUT_EN       0   
+#define ASR_MIDDLE_RESULT_OUT_EN       1
+// #define ASR_MIDDLE_RESULT_OUT_EN       0   
 //0：正常uart0作为日志串口 1：uart0作为调试采音串口 上传双声道数据;多消耗13KB SYS内存
 #define DEBUG_AUDIO_UART_UPLOAD_EN                   0
 #if DEBUG_AUDIO_UART_UPLOAD_EN
