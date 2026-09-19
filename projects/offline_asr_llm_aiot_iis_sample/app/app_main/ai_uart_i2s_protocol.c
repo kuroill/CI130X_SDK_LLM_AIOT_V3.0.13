@@ -385,8 +385,8 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
         send_ack(cmd->seq, start_downlink() ? AI_UART_ACK_OK : AI_UART_ACK_FAILED);
         break;
     case AI_UART_MSG_STOP_DOWNLINK:
-        send_ack(cmd->seq, AI_UART_ACK_OK);
         stop_downlink();
+        send_ack(cmd->seq, AI_UART_ACK_OK);
         send_state(AI_UART_STATE_LISTENING);
         break;
     case AI_UART_MSG_SET_VOLUME:
@@ -415,8 +415,8 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
         break;
     }
     case AI_UART_MSG_ENTER_WAKEUP_WAIT:
-        send_ack(cmd->seq, AI_UART_ACK_OK);
         stop_downlink();
+        send_ack(cmd->seq, AI_UART_ACK_OK);
         set_state_exit_wakeup();
         send_state(AI_UART_STATE_WAKEUP_WAIT);
         break;
