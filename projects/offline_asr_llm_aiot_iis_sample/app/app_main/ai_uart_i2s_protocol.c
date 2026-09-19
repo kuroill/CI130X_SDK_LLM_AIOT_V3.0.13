@@ -28,6 +28,8 @@
 #define AI_UART_HEARTBEAT_MS 1000
 #define AI_UART_PEER_TIMEOUT_MS 3000
 #define AI_PLAY_STOP_WAIT_MS 250
+#define AI_DOWNLINK_FINISH_TIMEOUT_MS 1500
+#define AI_DOWNLINK_FINISH_POLL_MS 5
 #define AI_AEC_START_WARN_MS 500
 #define AI_DOWNLINK_PCM_BUFFER_COUNT 4
 #define AI_AEC_START_WARN_POLLS \
@@ -45,6 +47,7 @@
 #define AI_UART_MSG_STOP_DOWNLINK 0x23
 #define AI_UART_MSG_SET_VOLUME 0x24
 #define AI_UART_MSG_ENTER_WAKEUP_WAIT 0x25
+#define AI_UART_MSG_FINISH_DOWNLINK 0x26
 #define AI_UART_MSG_ENTER_OTA_MODE 0x28
 
 #define AI_UART_ACK_OK 0x00
@@ -66,6 +69,7 @@ static volatile uint8_t firmware_info_sent;
 static volatile TickType_t last_peer_tick;
 static uint8_t tx_seq;
 static uint32_t downlink_bytes;
+static uint32_t downlink_nonzero_samples;
 static volatile uint32_t dropped_commands;
 static uint8_t downlink_play_buffer[
     AUDIO_CAP_POINT_NUM_PER_FRM * sizeof(int16_t) * AI_DOWNLINK_PCM_BUFFER_COUNT];
@@ -213,6 +217,62 @@ static void stop_downlink(void)
     }
 }
 
+static uint8_t finish_downlink(uint32_t expected_nonzero_samples)
+{
+    TickType_t started_at = xTaskGetTickCount();
+    TickType_t timeout_ticks = pdMS_TO_TICKS(AI_DOWNLINK_FINISH_TIMEOUT_MS);
+    uint32_t received_nonzero_samples = 0;
+
+    for(;;)
+    {
+        xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+        received_nonzero_samples = downlink_nonzero_samples;
+        if(received_nonzero_samples >= expected_nonzero_samples)
+        {
+            /* Freeze ingress only after the final non-zero PCM sample has been
+             * copied into PLAY_CODEC_ID. The complete codec frame containing
+             * that sample is already queued, including any trailing silence. */
+            downlink_enabled = 0;
+            xSemaphoreGive(downlink_mutex);
+            break;
+        }
+        xSemaphoreGive(downlink_mutex);
+
+        if((xTaskGetTickCount() - started_at) >= timeout_ticks)
+        {
+            mprintf(
+                "[DOWNLINK] finish failed reason=pcm_timeout expectedNonzero=%u receivedNonzero=%u\r\n",
+                (unsigned int)expected_nonzero_samples,
+                (unsigned int)received_nonzero_samples);
+            stop_downlink();
+            return 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(AI_DOWNLINK_FINISH_POLL_MS));
+    }
+
+    while(cm_get_codec_busy_buffer_number(PLAY_CODEC_ID, CODEC_OUTPUT) > 0)
+    {
+        if((xTaskGetTickCount() - started_at) >= timeout_ticks)
+        {
+            mprintf(
+                "[DOWNLINK] finish failed reason=codec_drain_timeout expectedNonzero=%u receivedNonzero=%u busy=%d\r\n",
+                (unsigned int)expected_nonzero_samples,
+                (unsigned int)received_nonzero_samples,
+                cm_get_codec_busy_buffer_number(PLAY_CODEC_ID, CODEC_OUTPUT));
+            stop_downlink();
+            return 0;
+        }
+        vTaskDelay(pdMS_TO_TICKS(AI_DOWNLINK_FINISH_POLL_MS));
+    }
+
+    stop_downlink();
+    mprintf(
+        "[DOWNLINK] finish complete expectedNonzero=%u receivedNonzero=%u\r\n",
+        (unsigned int)expected_nonzero_samples,
+        (unsigned int)received_nonzero_samples);
+    return 1;
+}
+
 static void downlink_task(void *arg)
 {
     (void)arg;
@@ -248,15 +308,21 @@ static void downlink_task(void *arg)
             if(output_addr)
             {
                 int16_t *output_pcm = (int16_t *)output_addr;
+                uint32_t nonzero_samples = 0;
                 /* ESP sends the mono TTS duplicated into both physical IIS slots.
                  * Feed one slot to the mono DAC, matching the validated ci_audio
                  * path and keeping the AEC reference tied to the actual playback. */
                 for(uint32_t i = 0; i < sample_count; i++)
                 {
                     output_pcm[i] = input_pcm[2U * i];
+                    if(0 != output_pcm[i])
+                    {
+                        nonzero_samples++;
+                    }
                 }
                 cm_write_codec(PLAY_CODEC_ID, (void *)output_addr, 0);
                 downlink_bytes += sample_count * sizeof(int16_t);
+                downlink_nonzero_samples += nonzero_samples;
             }
             xSemaphoreGive(downlink_mutex);
         }
@@ -308,6 +374,7 @@ static uint8_t start_downlink(void)
     cm_config_codec(PLAY_CODEC_ID, CODEC_OUTPUT, &sound_info);
 
     downlink_bytes = 0;
+    downlink_nonzero_samples = 0;
     downlink_codec_started = 1;
     /* Arm the V3 AEC before the DAC can emit the first queued sample. */
     ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING);
@@ -389,6 +456,27 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
         send_ack(cmd->seq, AI_UART_ACK_OK);
         send_state(AI_UART_STATE_LISTENING);
         break;
+    case AI_UART_MSG_FINISH_DOWNLINK:
+    {
+        uint32_t expected_nonzero_samples;
+        uint8_t finished;
+        if(4U != cmd->len)
+        {
+            send_ack(cmd->seq, AI_UART_ACK_FAILED);
+            mprintf("[DOWNLINK] finish rejected reason=invalid_length len=%u\r\n",
+                (unsigned int)cmd->len);
+            break;
+        }
+        expected_nonzero_samples =
+            (uint32_t)cmd->payload[0] |
+            ((uint32_t)cmd->payload[1] << 8) |
+            ((uint32_t)cmd->payload[2] << 16) |
+            ((uint32_t)cmd->payload[3] << 24);
+        finished = finish_downlink(expected_nonzero_samples);
+        send_ack(cmd->seq, finished ? AI_UART_ACK_OK : AI_UART_ACK_FAILED);
+        send_state(AI_UART_STATE_LISTENING);
+        break;
+    }
     case AI_UART_MSG_SET_VOLUME:
     {
         uint16_t requested_percent;
