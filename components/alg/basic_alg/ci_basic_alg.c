@@ -405,32 +405,59 @@ bool aec_ref_flag_set(void *wrapfft_audio_t)
     
 }
 
+/* In the single-mic internal-codec AEC topology, the host codec's left
+ * channel is MIC and its right channel is REF. USE_AEC currently also defines
+ * OFFLINE_DUAL_MIC_ALG_SUPPORT for the algorithm buffers, so that compile-time
+ * flag cannot be used to decide whether the physical right channel is a second
+ * microphone. Doing so applies the MIC gain to REF and can saturate the AEC
+ * reference at high playback volume. */
+static bool aec_host_codec_right_is_ref(void)
+{
+#if IF_USE_ANOTHER_CODEC_TO_GET_REF || REF_IN_FROM_INNER_CODEC || MIC_RECORD_IIS_SELECT
+    return false;
+#else
+    return (1 == g_ci_ssp_registe.audio_capture->mic_channel_num) &&
+           (1 == g_ci_ssp_registe.audio_capture->ref_channel_num);
+#endif
+}
+
 void aec_control_alc_disable_port(void)
-{    
+{
     // mprintf("aec_control_alc_disable_port1\r\n");
     int alc_off_codec_adc_gain_mic = ((aec_config_t*)(g_ci_ssp_config.aec.module_config))->alc_off_codec_adc_gain_mic;
-    #if !(OFFLINE_DUAL_MIC_ALG_SUPPORT)//双麦不用aec模块的ref增益，使用外挂codec
     int alc_off_codec_adc_gain_ref = ((aec_config_t*)(g_ci_ssp_config.aec.module_config))->alc_off_codec_adc_gain_ref;
-    #endif
 
     cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_LEFT, DISABLE);
     cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_LEFT, alc_off_codec_adc_gain_mic);
     cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, DISABLE);
-    #if !(OFFLINE_DUAL_MIC_ALG_SUPPORT)
-    cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, alc_off_codec_adc_gain_ref);
-    #else
-    cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, alc_off_codec_adc_gain_mic);
-    #endif
+    cm_set_codec_adc_gain(
+        HOST_MIC_RECORD_CODEC_ID,
+        CM_CHA_RIGHT,
+        aec_host_codec_right_is_ref() ? alc_off_codec_adc_gain_ref : alc_off_codec_adc_gain_mic);
+    mprintf(
+        "[AEC] fixed_gain micDb=%d hostRightRole=%s hostRightDb=%d\r\n",
+        alc_off_codec_adc_gain_mic,
+        aec_host_codec_right_is_ref() ? "ref" : "mic",
+        aec_host_codec_right_is_ref() ? alc_off_codec_adc_gain_ref : alc_off_codec_adc_gain_mic);
 }
 void aec_control_alc_enable_port(void)
 {
     // mprintf("aec_control_alc_enable_port1\r\n");
     cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_LEFT, ENABLE);
     cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_LEFT, 20);
-    #if (OFFLINE_DUAL_MIC_ALG_SUPPORT)
-    cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, ENABLE);
-    cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, 20);
-    #endif
+    if(aec_host_codec_right_is_ref())
+    {
+        int alc_off_codec_adc_gain_ref = ((aec_config_t*)(g_ci_ssp_config.aec.module_config))->alc_off_codec_adc_gain_ref;
+        cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, DISABLE);
+        cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, alc_off_codec_adc_gain_ref);
+    }
+#if OFFLINE_DUAL_MIC_ALG_SUPPORT
+    else
+    {
+        cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, ENABLE);
+        cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, 20);
+    }
+#endif
 }
 
 static bool aec_start_alc_process(void)
@@ -456,11 +483,13 @@ static bool aec_start_alc_process(void)
     }
     else
     {
-        #if (OFFLINE_DUAL_MIC_ALG_SUPPORT)
         int alc_off_codec_adc_gain_mic = ((aec_config_t*)(g_ci_ssp_config.aec.module_config))->alc_off_codec_adc_gain_mic;
+        int alc_off_codec_adc_gain_ref = ((aec_config_t*)(g_ci_ssp_config.aec.module_config))->alc_off_codec_adc_gain_ref;
         cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_LEFT, alc_off_codec_adc_gain_mic);
-        cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, alc_off_codec_adc_gain_mic);
-        #endif
+        cm_set_codec_adc_gain(
+            HOST_MIC_RECORD_CODEC_ID,
+            CM_CHA_RIGHT,
+            aec_host_codec_right_is_ref() ? alc_off_codec_adc_gain_ref : alc_off_codec_adc_gain_mic);
         return false;
     }
 }
@@ -474,10 +503,19 @@ static bool aec_end_alc_process(void)
     }
     if(CI_SS_AEC_ALC_CLOSED == ciss_get(CI_SS_AEC_ALC_STATE))
     {
-        #if (OFFLINE_DUAL_MIC_ALG_SUPPORT)
         cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_LEFT, 20);
-        cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, 20);
-        #endif
+        if(aec_host_codec_right_is_ref())
+        {
+            int alc_off_codec_adc_gain_ref = ((aec_config_t*)(g_ci_ssp_config.aec.module_config))->alc_off_codec_adc_gain_ref;
+            cm_set_codec_alc(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, DISABLE);
+            cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, alc_off_codec_adc_gain_ref);
+        }
+#if OFFLINE_DUAL_MIC_ALG_SUPPORT
+        else
+        {
+            cm_set_codec_adc_gain(HOST_MIC_RECORD_CODEC_ID, CM_CHA_RIGHT, 20);
+        }
+#endif
     }
     return false;
 }
