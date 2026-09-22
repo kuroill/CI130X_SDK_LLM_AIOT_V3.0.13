@@ -27,6 +27,7 @@
 #define AI_UART_RX_MAX_PAYLOAD 64
 #define AI_UART_HEARTBEAT_MS 1000
 #define AI_UART_PEER_TIMEOUT_MS 3000
+#define AI_UART_FIRMWARE_INFO_INTERVAL_MS 30000
 #define AI_PLAY_STOP_WAIT_MS 250
 #define AI_DOWNLINK_FINISH_TIMEOUT_MS 1500
 #define AI_DOWNLINK_FINISH_POLL_MS 5
@@ -67,6 +68,7 @@ static volatile uint8_t downlink_codec_started;
 static volatile uint8_t i2s_rx_ready;
 static volatile uint8_t firmware_info_sent;
 static volatile TickType_t last_peer_tick;
+static volatile TickType_t last_firmware_info_tick;
 static uint8_t tx_seq;
 static uint32_t downlink_bytes;
 static uint32_t downlink_nonzero_samples;
@@ -162,6 +164,7 @@ static void send_firmware_info(void)
     payload[8] = 0;
     send_frame(AI_UART_MSG_FIRMWARE_INFO, payload, sizeof(payload));
     firmware_info_sent = 1;
+    last_firmware_info_tick = xTaskGetTickCount();
 }
 
 static void send_ack(uint8_t seq, uint8_t status)
@@ -400,7 +403,7 @@ static void mark_peer_rx(void)
     if(!was_ready)
     {
         audio_pre_rslt_start();
-        if(i2s_rx_ready && !firmware_info_sent)
+        if(i2s_rx_ready)
         {
             send_firmware_info();
         }
@@ -618,7 +621,7 @@ int ai_uart_i2s_peer_ready(void)
 void ai_uart_i2s_on_audio_ready(void)
 {
     i2s_rx_ready = 1;
-    if(peer_ready && !firmware_info_sent)
+    if(peer_ready)
     {
         send_firmware_info();
     }
@@ -680,10 +683,17 @@ static void heartbeat_task(void *arg)
         if(peer_ready && (now - last_peer_tick) >= pdMS_TO_TICKS(AI_UART_PEER_TIMEOUT_MS))
         {
             peer_ready = 0;
+            firmware_info_sent = 0;
             stop_downlink();
             audio_pre_rslt_stop();
             current_state = AI_UART_STATE_WAKEUP_WAIT;
             mprintf("[AI_UART] peer timeout\r\n");
+        }
+        if(peer_ready && i2s_rx_ready && firmware_info_sent &&
+           (now - last_firmware_info_tick) >=
+               pdMS_TO_TICKS(AI_UART_FIRMWARE_INFO_INTERVAL_MS))
+        {
+            send_firmware_info();
         }
         if(dropped_commands)
         {

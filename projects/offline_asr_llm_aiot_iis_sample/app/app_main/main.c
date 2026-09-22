@@ -405,7 +405,10 @@ static void task_init(void *p_arg)
     #endif
     #if (!COMMAND_LINE_CONSOLE_EN)
     //语音系统准备OK
-    cias_send_cmd(CIAS_AUDIO_SYS_READY, DEF_FILL); 
+    cias_send_cmd(CIAS_AUDIO_SYS_READY, DEF_FILL);
+    #if AI_UART_CONTROL_EN
+    ai_uart_i2s_on_audio_ready();
+    #endif
     #if 0
     while(1)
     {
