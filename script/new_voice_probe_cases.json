@@ -1,0 +1,12 @@
+[
+  {"id":"P-EN-N1","class":"positive","lang":"en-US","text":"Vitana"},
+  {"id":"P-EN-N2","class":"positive","lang":"en-US","text":"Hi Vitana"},
+  {"id":"N-EN-N1","class":"negative","lang":"en-US","text":"Hi Diana"},
+  {"id":"N-EN-N2","class":"negative","lang":"en-US","text":"Hi Vienna"},
+  {"id":"N-EN-N3","class":"negative","lang":"en-US","text":"Color key"},
+  {"id":"P-ES-N1","class":"positive","lang":"es-ES","text":"Vitana"},
+  {"id":"P-ES-N2","class":"positive","lang":"es-ES","text":"Hi Vitana"},
+  {"id":"N-ES-N1","class":"negative","lang":"es-ES","text":"Ventana"},
+  {"id":"N-ES-N2","class":"negative","lang":"es-ES","text":"La ventana"},
+  {"id":"N-ES-N3","class":"negative","lang":"es-ES","text":"Vitamina"}
+]

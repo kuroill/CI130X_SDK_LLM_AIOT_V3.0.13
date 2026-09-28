@@ -1,5 +1,5 @@
 ﻿param(
-    [string]$Port = "COM7",
+    [string]$Port = "COM3",
     [int]$Baud = 921600,
     [switch]$List
 )

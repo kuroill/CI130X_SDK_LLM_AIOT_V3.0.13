@@ -80,8 +80,8 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
 #endif
 
 //输出识别中间结果使能
-#define ASR_MIDDLE_RESULT_OUT_EN       1
-// #define ASR_MIDDLE_RESULT_OUT_EN       0   
+// #define ASR_MIDDLE_RESULT_OUT_EN       1
+#define ASR_MIDDLE_RESULT_OUT_EN       0
 //0：正常uart0作为日志串口 1：uart0作为调试采音串口 上传双声道数据;多消耗13KB SYS内存
 #define DEBUG_AUDIO_UART_UPLOAD_EN                   0
 #if DEBUG_AUDIO_UART_UPLOAD_EN
@@ -229,7 +229,7 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
 #endif 
 
 //**语音识别配置
-#define USE_SEPARATE_WAKEUP_EN          0       //当前V01900模型同时负责常驻唤醒与本地识别
+#define USE_SEPARATE_WAKEUP_EN          1       //使用V02427双网络：[0]命令词模型，[1]独立唤醒词模型
 #define DEFAULT_MODEL_GROUP_ID          1       //模型ID,用于指定上电启动时，默认进入的语言模型。通常0为命令词模型,1为唤醒词模型
     
 #if (!USE_SEPARATE_WAKEUP_EN)    
