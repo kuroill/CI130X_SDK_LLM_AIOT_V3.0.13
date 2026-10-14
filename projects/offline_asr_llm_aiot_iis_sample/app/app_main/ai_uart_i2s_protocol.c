@@ -55,6 +55,8 @@
 #define AI_UART_ACK_UNSUPPORTED 0x02
 #define AI_UART_ACK_FAILED 0x03
 
+#include "ci_conversation.generated.h"
+
 #define AI_UART_STATE_WAKEUP_WAIT 0x01
 #define AI_UART_STATE_LISTENING 0x02
 #define AI_UART_STATE_DOWNLINK_PLAYING 0x04
@@ -63,6 +65,16 @@ static SemaphoreHandle_t send_mutex;
 static SemaphoreHandle_t downlink_mutex;
 static volatile uint8_t peer_ready;
 static volatile uint8_t current_state = AI_UART_STATE_WAKEUP_WAIT;
+static volatile uint8_t conversation_state = CI_CONVERSATION_STATE_INACTIVE;
+static volatile TickType_t conversation_state_tick;
+
+static void set_conversation_state(uint8_t state)
+{
+    taskENTER_CRITICAL();
+    conversation_state_tick = xTaskGetTickCount();
+    conversation_state = state;
+    taskEXIT_CRITICAL();
+}
 static volatile uint8_t downlink_enabled;
 static volatile uint8_t downlink_codec_started;
 static volatile uint8_t i2s_rx_ready;
@@ -505,7 +517,17 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
             ((unsigned int)requested_percent * 12U) / 5U);
         break;
     }
+    case CI_CONVERSATION_COMMAND_SET_STATE:
+        if((1U != cmd->len) || (cmd->payload[0] > CI_CONVERSATION_STATE_WAITING))
+        {
+            send_ack(cmd->seq, AI_UART_ACK_FAILED);
+            break;
+        }
+        set_conversation_state(cmd->payload[0]);
+        send_ack(cmd->seq, AI_UART_ACK_OK);
+        break;
     case AI_UART_MSG_ENTER_WAKEUP_WAIT:
+        set_conversation_state(CI_CONVERSATION_STATE_INACTIVE);
         stop_downlink();
         send_ack(cmd->seq, AI_UART_ACK_OK);
         set_state_exit_wakeup();
@@ -687,6 +709,7 @@ static void heartbeat_task(void *arg)
             stop_downlink();
             audio_pre_rslt_stop();
             current_state = AI_UART_STATE_WAKEUP_WAIT;
+            set_conversation_state(CI_CONVERSATION_STATE_INACTIVE);
             mprintf("[AI_UART] peer timeout\r\n");
         }
         if(peer_ready && i2s_rx_ready && firmware_info_sent &&
@@ -722,6 +745,16 @@ void ai_uart_i2s_protocol_init(void)
     __eclic_irq_set_vector(UART1_IRQn, (int32_t)uart_irq_handler);
     UARTInterruptConfig((UART_TypeDef *)AI_UART_CONTROL_UART, AI_UART_CONTROL_BAUDRATE);
     send_state(AI_UART_STATE_WAKEUP_WAIT);
+}
+
+bool ai_uart_i2s_conversation_active(void)
+{
+    bool active;
+    taskENTER_CRITICAL();
+    active = peer_ready && (conversation_state != CI_CONVERSATION_STATE_INACTIVE) &&
+        ((xTaskGetTickCount() - conversation_state_tick) < pdMS_TO_TICKS(5000));
+    taskEXIT_CRITICAL();
+    return active;
 }
 
 void ai_uart_i2s_on_wake(uint16_t wake_id)

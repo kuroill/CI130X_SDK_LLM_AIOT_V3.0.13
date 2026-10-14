@@ -2,6 +2,7 @@
 #define __AI_UART_I2S_PROTOCOL_H__
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define AI_UART_COMMAND_PAYLOAD_MAX 8
 
@@ -17,6 +18,7 @@ void ai_uart_i2s_protocol_init(void);
 void ai_uart_i2s_on_audio_ready(void);
 int ai_uart_i2s_peer_ready(void);
 void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd);
+bool ai_uart_i2s_conversation_active(void);
 void ai_uart_i2s_on_wake(uint16_t wake_id);
 void ai_uart_i2s_on_ding_done(void);
 

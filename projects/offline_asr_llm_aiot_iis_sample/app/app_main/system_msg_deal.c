@@ -594,7 +594,22 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
 {
     xSemaphoreTake(WakeupMutex, portMAX_DELAY);
 
+    bool active_conversation = ai_uart_i2s_conversation_active();
     ai_uart_i2s_on_wake(cmd_info_get_command_id(cmd_handle));
+    if(active_conversation)
+    {
+        /* Wake is still reported and preempts old playback. Do not fabricate
+         * DING_DONE: no prompt was played. Restore ASR without the ding callback. */
+        sys_msg_t resume_msg = {0};
+        resume_msg.msg_type = SYS_MSG_TYPE_CMD_INFO;
+        resume_msg.msg_data.cmd_info_data.cmd_info_status = MSG_CMD_INFO_STATUS_POST_CHANGE_ASR_NORMAL_WORD;
+        set_state_enter_wakeup(exit_wakup_ms);
+        sys_weakup_hook();
+        xSemaphoreGive(WakeupMutex);
+        send_msg_to_sys_task(&resume_msg, NULL);
+        mprintf("[WAKE] repeat wake reported; ding suppressed reason=active_conversation\r\n");
+        return;
+    }
 
     /*if last state is unwakeup, need change asr word*/
     if(SYS_STATE_UNWAKEUP == get_wakeup_state())
