@@ -32,8 +32,17 @@ typedef struct
     SemaphoreHandle_t recorded_count_sem;               //用于同步已录block数的计数信号量。
 }record_buffer_queue_t;
 
+typedef enum
+{
+    CM_SLAVE_OUTPUT_STOPPED = 0,
+    CM_SLAVE_OUTPUT_DISABLING,
+    CM_SLAVE_OUTPUT_STARTING,
+    CM_SLAVE_OUTPUT_RUNNING,
+}cm_slave_output_state_t;
+
 typedef struct
 {
+    cm_slave_output_state_t slave_output_state;
     void (*callback_func)(void);                    //指针数组，用于保存每个CODEC的事件回调函数    
     cm_codec_hw_info_t codec_hw_info;               //用于保存CODEC接口（IIS,DMA,IIC等）相关配置。
     cm_sound_info_t play_sound_info;                //用于保存音频相关配置信息。
@@ -600,12 +609,50 @@ int cm_config_codec(int codec_index, io_direction_t io_dir, cm_sound_info_t * so
     return 0;
 }
 
+static void cm_start_output_dma(codec_info_t *code_info_p)
+{
+    iis_base_t IISx = code_info_p->codec_hw_info.output_iis.IISx;
+    IISDMAChax iis_dma_channel = get_iis_dma_channel(IISx);
+    play_buffer_queue_t *play_buffer_queue = &code_info_p->play_buffer_queue;
+    BaseType_t xResult = xQueueReceive(play_buffer_queue->busy_queue, &(play_buffer_queue->data_begin_addr), 0);
+    if (pdTRUE == xResult)
+    {
+        play_buffer_queue->data_end_addr = play_buffer_queue->data_begin_addr + code_info_p->play_buffer_info.buffer_size;
+    }
+    else
+    {
+        play_buffer_queue->data_begin_addr = (uint32_t)&cm.zero_buffer[0];
+        play_buffer_queue->data_end_addr = ((uint32_t)&cm.zero_buffer[0])+code_info_p->play_buffer_info.block_size;
+    }
+
+    play_buffer_queue->data_current_addr = play_buffer_queue->data_begin_addr;
+    IISxDMA_TADDR0(IISDMA0,iis_dma_channel,play_buffer_queue->data_current_addr);
+    play_buffer_queue->data_current_addr += code_info_p->play_buffer_info.block_size;
+    if (play_buffer_queue->data_current_addr < play_buffer_queue->data_end_addr)
+    {
+        IISxDMA_TADDR1(IISDMA0,iis_dma_channel,play_buffer_queue->data_current_addr);
+        play_buffer_queue->data_current_addr += code_info_p->play_buffer_info.block_size;
+    }
+    else
+    {
+        IISxDMA_TADDR1(IISDMA0,iis_dma_channel,(uint32_t)&cm.zero_buffer[0]);
+    }
+    play_buffer_queue->last_data_begin_addr = 0;
+    IISxDMA_TXADDRRollbackInterruptClear(IISDMA0,iis_dma_channel,IISDMA_TXAAD_Sel_ADDR0);
+    IISDMA_RXTXClear(IISDMA0,iis_dma_channel,IISxDMA_TX_EN);
+    IISDMA_INT_Clear(IISDMA0, (1U << (10U + iis_dma_channel)) |
+        (1U << (1U + iis_dma_channel * 2U + IISxDMA_TX_EN)));
+    code_info_p->slave_output_state = CM_SLAVE_OUTPUT_RUNNING;
+    IISDMA_ChannelENConfig(IISDMA0,iis_dma_channel,IISxDMA_TX_EN,ENABLE);
+    IISDMA_ADDRRollBackINT(IISDMA0,iis_dma_channel,IISxDMA_TX_EN,ENABLE);
+
+    IISDMA_EN(IISDMA0,ENABLE);
+}
+
 int cm_start_codec(int codec_index, io_direction_t io_dir)
 {
     codec_info_t * code_info_p = &(cm.codec_info[codec_index]);
     iis_base_t IISx;
-    play_buffer_queue_t * play_buffer_queue = &(code_info_p->play_buffer_queue);
-
     xSemaphoreTake(cm.semaphore, portMAX_DELAY);
     if (code_info_p->codec_hw_info.codec_if.codec_start)
     {
@@ -626,44 +673,142 @@ int cm_start_codec(int codec_index, io_direction_t io_dir)
     else
     {
         IISx = code_info_p->codec_hw_info.output_iis.IISx;
-        IISDMAChax iis_dma_channel = get_iis_dma_channel(IISx);   
-        BaseType_t xResult = xQueueReceive(play_buffer_queue->busy_queue, &(play_buffer_queue->data_begin_addr), 0);
-        if (pdTRUE == xResult)
-        {
-            play_buffer_queue->data_end_addr = play_buffer_queue->data_begin_addr + code_info_p->play_buffer_info.buffer_size;
-            ci_logdebug(LOG_AUDIO_PLAY, "get0,%x\n", play_buffer_queue->data_begin_addr);
-        }
-        else
-        {
-            play_buffer_queue->data_begin_addr = (uint32_t)&cm.zero_buffer[0];
-            // play_buffer_queue->data_end_addr = (uint32_t)&cm.zero_buffer[ZERO_BUFFER_SIZE];
-            play_buffer_queue->data_end_addr = ((uint32_t)&cm.zero_buffer[0])+code_info_p->play_buffer_info.block_size;
-        }
-        
-        play_buffer_queue->data_current_addr = play_buffer_queue->data_begin_addr;
-        IISxDMA_TADDR0(IISDMA0,iis_dma_channel,play_buffer_queue->data_current_addr);
-        play_buffer_queue->data_current_addr += cm.codec_info[codec_index].play_buffer_info.block_size;
-        if (play_buffer_queue->data_current_addr < play_buffer_queue->data_end_addr)
-        {
-            IISxDMA_TADDR1(IISDMA0,iis_dma_channel,play_buffer_queue->data_current_addr);
-            play_buffer_queue->data_current_addr += cm.codec_info[codec_index].play_buffer_info.block_size;
-        }
-        else
-        {
-            IISxDMA_TADDR1(IISDMA0,iis_dma_channel,(uint32_t)&cm.zero_buffer[0]);
-        }
-        play_buffer_queue->last_data_begin_addr = 0;
-        IISxDMA_TXADDRRollbackInterruptClear(IISDMA0,iis_dma_channel,IISDMA_TXAAD_Sel_ADDR0);
-        IISDMA_RXTXClear(IISDMA0,iis_dma_channel,IISxDMA_TX_EN);
-        IISDMA_ChannelENConfig(IISDMA0,iis_dma_channel,IISxDMA_TX_EN,ENABLE);
-        IISDMA_ADDRRollBackINT(IISDMA0,iis_dma_channel,IISxDMA_TX_EN,ENABLE);
-        
-        IISDMA_EN(IISDMA0,ENABLE);
+        cm_start_output_dma(code_info_p);
         iis_tx_enable(IISx,code_info_p->codec_hw_info.output_iis.tx_cha,ENABLE);
     }
 
     xSemaphoreGive(cm.semaphore);
     return 0;
+}
+
+static int cm_is_external_slave_output(int codec_index)
+{
+    return (codec_index >= 0) && (codec_index < MAX_CODEC_NUM) &&
+        cm.reg_flag[codec_index] &&
+        (cm.codec_info[codec_index].codec_hw_info.output_iis.IISx == IIS0) &&
+        (cm.codec_info[codec_index].codec_hw_info.output_iis.iis_mode_sel == IIS_SLAVE) &&
+        !cm.codec_info[codec_index].codec_hw_info.codec_if.codec_start &&
+        !cm.codec_info[codec_index].codec_hw_info.codec_if.codec_stop &&
+        cm.codec_info[codec_index].play_buffer_queue.idle_queue &&
+        cm.codec_info[codec_index].play_buffer_queue.busy_queue;
+}
+
+int cm_try_start_slave_output(int codec_index)
+{
+    if(!cm_is_external_slave_output(codec_index) || check_curr_trap())
+    {
+        return -1;
+    }
+    if(pdTRUE != xSemaphoreTake(cm.semaphore, 0))
+    {
+        return 1;
+    }
+    codec_info_t *info = &cm.codec_info[codec_index];
+    cm_iis_info_t *iis = &info->codec_hw_info.output_iis;
+    if(info->slave_output_state == CM_SLAVE_OUTPUT_DISABLING)
+    {
+        if(iis_tx_try_enable(iis->IISx, iis->tx_cha, DISABLE))
+        {
+            xSemaphoreGive(cm.semaphore);
+            return 1;
+        }
+        info->slave_output_state = CM_SLAVE_OUTPUT_STOPPED;
+    }
+    if(info->slave_output_state != CM_SLAVE_OUTPUT_RUNNING)
+    {
+        info->slave_output_state = CM_SLAVE_OUTPUT_STARTING;
+        if(iis_tx_try_enable(iis->IISx, iis->tx_cha, ENABLE))
+        {
+            xSemaphoreGive(cm.semaphore);
+            return 1;
+        }
+        portENTER_CRITICAL();
+        cm_start_output_dma(info);
+        portEXIT_CRITICAL();
+    }
+    xSemaphoreGive(cm.semaphore);
+    return 0;
+}
+
+int cm_cancel_slave_output(int codec_index)
+{
+    if(!cm_is_external_slave_output(codec_index) || check_curr_trap())
+    {
+        return -1;
+    }
+    if(pdTRUE != xSemaphoreTake(cm.semaphore, 0))
+    {
+        return 1;
+    }
+    codec_info_t *info = &cm.codec_info[codec_index];
+    play_buffer_queue_t *queue = &info->play_buffer_queue;
+    IISDMAChax channel = get_iis_dma_channel(info->codec_hw_info.output_iis.IISx);
+    uint32_t current;
+    uint32_t previous;
+    void *buffer;
+    int result = 0;
+
+    /* Stop DMA before reclaiming either hardware-owned buffer. Mask and clear
+     * only this TX channel; resetting IIS0/IISDMA0 would also break RX or ADC. */
+    portENTER_CRITICAL();
+    info->slave_output_state = CM_SLAVE_OUTPUT_DISABLING;
+    IISDMA_ChannelENConfig(IISDMA0, channel, IISxDMA_TX_EN, DISABLE);
+    IISDMA_ADDRRollBackINT(IISDMA0, channel, IISxDMA_TX_EN, DISABLE);
+    IISDMA_ChannelIntENConfig(IISDMA0, channel, IISxDMA_TX_EN, DISABLE);
+    IISxDMA_TXADDRRollbackInterruptClear(IISDMA0, channel, IISDMA_TXAAD_Sel_ADDR0);
+    IISDMA_RXTXClear(IISDMA0, channel, IISxDMA_TX_EN);
+    IISDMA_INT_Clear(IISDMA0, (1U << (10U + channel)) |
+        (1U << (1U + channel * 2U + IISxDMA_TX_EN)));
+    current = queue->data_begin_addr;
+    previous = queue->last_data_begin_addr;
+    queue->data_begin_addr = 0;
+    queue->last_data_begin_addr = 0;
+    queue->data_current_addr = 0;
+    queue->data_end_addr = 0;
+    IISxDMA_TADDR0(IISDMA0, channel, (uint32_t)cm.zero_buffer);
+    IISxDMA_TADDR1(IISDMA0, channel, (uint32_t)cm.zero_buffer);
+    portEXIT_CRITICAL();
+
+    while(pdTRUE == xQueueReceive(queue->busy_queue, &buffer, 0))
+    {
+        if(pdTRUE != xQueueSend(queue->idle_queue, &buffer, 0))
+        {
+            result = -1;
+        }
+    }
+    if(current && (current != (uint32_t)cm.zero_buffer))
+    {
+        if(pdTRUE != xQueueSend(queue->idle_queue, &current, 0))
+        {
+            result = -1;
+        }
+    }
+    if(previous && (previous != current) && (previous != (uint32_t)cm.zero_buffer))
+    {
+        if(pdTRUE != xQueueSend(queue->idle_queue, &previous, 0))
+        {
+            result = -1;
+        }
+    }
+    if(uxQueueMessagesWaiting(queue->idle_queue) != info->play_buffer_info.buffer_num)
+    {
+        result = -1;
+    }
+    /* With no SCK the register load may remain pending. Its intent is retained
+     * in DISABLING and must complete before any later start is allowed. */
+    if(!iis_tx_try_enable(info->codec_hw_info.output_iis.IISx,
+        info->codec_hw_info.output_iis.tx_cha, DISABLE))
+    {
+        info->slave_output_state = CM_SLAVE_OUTPUT_STOPPED;
+    }
+    xSemaphoreGive(cm.semaphore);
+    if(result < 0)
+    {
+        mprintf("[AI_I2S] cancel failed codec=%d reason=buffer_ownership idle=%u expected=%u\r\n",
+            codec_index, (unsigned int)uxQueueMessagesWaiting(queue->idle_queue),
+            (unsigned int)info->play_buffer_info.buffer_num);
+    }
+    return result;
 }
 
 int cm_stop_codec(int codec_index, io_direction_t io_dir)
@@ -1029,6 +1174,14 @@ void cm_output_interrupt_handler(IISDMAChax dma_channel, BaseType_t * xHigherPri
     int codec_index = cm.dma_channel_to_codec_index[dma_channel];
     codec_info_t * code_info_p = &(cm.codec_info[codec_index]);
     play_buffer_queue_t * play_buffer_queue = &(code_info_p->play_buffer_queue);
+
+    /* A late canceled slave-TX IRQ must never return a reclaimed buffer twice. */
+    if((code_info_p->codec_hw_info.output_iis.IISx == IIS0) &&
+       (code_info_p->codec_hw_info.output_iis.iis_mode_sel == IIS_SLAVE) &&
+       (code_info_p->slave_output_state != CM_SLAVE_OUTPUT_RUNNING))
+    {
+        return;
+    }
 
     // 先把刚用过的buffer放入空闲队列
     if (play_buffer_queue->last_data_begin_addr)

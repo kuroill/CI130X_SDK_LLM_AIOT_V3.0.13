@@ -18,6 +18,8 @@ void ai_uart_i2s_protocol_init(void);
 void ai_uart_i2s_on_audio_ready(void);
 int ai_uart_i2s_peer_ready(void);
 void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd);
+/* Only the existing system-message owner executes link-loss side effects. */
+void ai_uart_i2s_handle_timeout(void);
 bool ai_uart_i2s_conversation_active(void);
 void ai_uart_i2s_on_wake(uint16_t wake_id);
 void ai_uart_i2s_on_ding_done(void);

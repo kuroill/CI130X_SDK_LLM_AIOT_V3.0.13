@@ -35,4 +35,37 @@ make clean; make -r -j8
 关闭捕捉
 #define ASR_MIDDLE_RESULT_OUT_EN       0  
 
+## ESP 重启与 I2S 恢复验证
+
+`offline_asr_llm_aiot_iis_sample` 的掉线清理由现有系统消息任务串行执行。
+心跳任务只提交合并的超时事件；清理期间不重新开放 PCM 生产。
+外部 IIS0 从机 TX 先停止本通道 DMA、清除本通道中断、归还队列和硬件持有的缓冲区，
+再由 codec owner 记录/完成 IIS 禁用。缺少 ESP BCLK/LRCK 时不等待寄存器装载，
+时钟恢复后先完成旧禁用再启用 TX；不复位共享 IISDMA、ADC 或本地 DAC。
+内部 DAC 的正常播放、FINISH 排空和 AEC 尾音流程保留。
+
+macOS 可执行主机模拟回归，不构建 CI 镜像：
+
+```sh
+python3 script/test_iis_peer_recovery.py
+```
+
+Windows 正式构建后，先在单台验证机检查：
+
+1. 正常唤醒、回复播放、播放期打断与连续对话，音量和 AEC 行为应与升级前一致。
+2. 保持 CI 供电，让 ESP 单独重启；分别在空闲和播放后测试。CI 本地唤醒仍可用，
+   UART PING 持续，日志依次出现 `peer timeout state=stopping`、
+   `uplink canceled dma=off buffers=reclaimed`、`peer cleanup complete`。
+3. ESP 恢复后出现 `peer ready`、`continuous uplink started`，再次唤醒可正常收音和播放。
+   `buffer_ownership` 表示缓冲区所有权异常；停在 `state=stopping` 应检查清理 owner/锁；
+   已 `cleanup complete` 但未恢复上行，应检查 BCLK/LRCK 和 IIS 装载状态。
+4. 再验证 ESP OTA：下载校验后新版本启动，必须收到 CI PING 和本次启动的
+   `FIRMWARE_INFO`，日志出现 `confirmed healthy`、`ciFirmwareObserved=true`，
+   云端成功回执后仍需重新验证语音；出现 `ciReady=false` 优先查 UART，
+   `ciReady=true` 但 `ciBootHealthReady=false` 优先查 CI 初始化/清理，
+   Guru Meditation/WDT/Backtrace 则按 ESP 崩溃排查。
+
+主机回归不验证芯片实际时序、音质或固件链接尺寸。CI 正式镜像必须在 Windows SDK
+环境重新生成；ESP32 镜像由用户手动构建。原有 `target` OTA 文件不包含这些源码修改。
+
 *版权归chipintelli公司所有，未经允许不得使用或修改*

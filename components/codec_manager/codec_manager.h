@@ -190,6 +190,14 @@ extern int cm_start_codec(int codec_index, io_direction_t io_dir);
 
 extern int cm_stop_codec(int codec_index, io_direction_t io_dir);
 
+/* IIS0 slave output lifecycle; task context and one serialized PCM producer.
+ * 0 = complete, 1 = retry later, -1 = invalid configuration/buffer ownership.
+ * Cancel stops only this TX DMA, returns its buffers without a clock/drain wait,
+ * and records the pending IIS disable. The next try-start completes that disable
+ * before enabling TX. RX, internal ADC/DAC and the shared DMA remain running. */
+extern int cm_try_start_slave_output(int codec_index);
+extern int cm_cancel_slave_output(int codec_index);
+
 extern int cm_read_codec(int codec_index, uint32_t * data_addr, uint32_t * data_size);
 
 extern int cm_write_codec(int codec_index, void * pcm_buffer,uint32_t wait_tick);

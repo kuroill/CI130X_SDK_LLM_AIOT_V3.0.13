@@ -141,6 +141,7 @@ typedef enum
     SYS_MSG_TYPE_SET_PALY_PARAMETER,   //音量，语速，语调
     SYS_MSG_TYPE_FACTORY_TEST_PLAY,    //生产测试播放
     SYS_MSG_TYPE_AI_UART,
+    SYS_MSG_TYPE_AI_UART_TIMEOUT,
 }sys_msg_type_t;
 
 

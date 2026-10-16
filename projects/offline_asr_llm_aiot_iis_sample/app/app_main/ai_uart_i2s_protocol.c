@@ -63,7 +63,16 @@
 
 static SemaphoreHandle_t send_mutex;
 static SemaphoreHandle_t downlink_mutex;
-static volatile uint8_t peer_ready;
+typedef enum
+{
+    AI_LINK_LOST = 0,
+    AI_LINK_READY,
+    AI_LINK_STOPPING,
+}ai_link_state_t;
+
+static volatile ai_link_state_t link_state = AI_LINK_LOST;
+/* At most one timeout event is queued; only the system task consumes it. */
+static volatile uint8_t timeout_event_queued;
 static volatile uint8_t current_state = AI_UART_STATE_WAKEUP_WAIT;
 static volatile uint8_t conversation_state = CI_CONVERSATION_STATE_INACTIVE;
 static volatile TickType_t conversation_state_tick;
@@ -409,8 +418,8 @@ static uint8_t start_downlink(void)
 
 static void mark_peer_rx(void)
 {
-    uint8_t was_ready = peer_ready;
-    peer_ready = 1;
+    uint8_t was_ready = (link_state == AI_LINK_READY);
+    link_state = AI_LINK_READY;
     last_peer_tick = xTaskGetTickCount();
     if(!was_ready)
     {
@@ -453,8 +462,61 @@ static uint8_t persist_ota_mcu_status(uint8_t status)
     return 1;
 }
 
+static void progress_peer_loss(void)
+{
+    if(link_state != AI_LINK_STOPPING)
+    {
+        return;
+    }
+    stop_downlink();
+    int stopped = i2s_rx_ready ? audio_pre_rslt_stop() : 1;
+    if(stopped <= 0)
+    {
+        if(stopped < 0)
+        {
+            mprintf("[AI_UART] peer cleanup failed reason=uplink_ownership\r\n");
+        }
+        return;
+    }
+    link_state = AI_LINK_LOST;
+    mprintf("[AI_UART] peer cleanup complete state=lost heartbeat=running\r\n");
+}
+
+void ai_uart_i2s_handle_timeout(void)
+{
+    TickType_t now = xTaskGetTickCount();
+    /* An already queued timeout may belong to an older UART silence window. */
+    if((link_state == AI_LINK_READY) &&
+       ((now - last_peer_tick) >= pdMS_TO_TICKS(AI_UART_PEER_TIMEOUT_MS)))
+    {
+        link_state = AI_LINK_STOPPING;
+        firmware_info_sent = 0;
+        current_state = AI_UART_STATE_WAKEUP_WAIT;
+        set_conversation_state(CI_CONVERSATION_STATE_INACTIVE);
+        mprintf("[AI_UART] peer timeout state=stopping silence_ms=%u owner=system\r\n",
+            (unsigned int)((now - last_peer_tick) * portTICK_PERIOD_MS));
+    }
+    progress_peer_loss();
+    timeout_event_queued = 0;
+}
+
 void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
 {
+    progress_peer_loss();
+    if(link_state == AI_LINK_STOPPING)
+    {
+        /* Fresh UART frames cannot resume PCM while its old buffers are owned
+         * by cleanup. Heartbeat responses continue; commands retry via ACK. */
+        if(cmd->type == AI_UART_MSG_PING)
+        {
+            send_frame(AI_UART_MSG_PONG, cmd->payload, cmd->len);
+        }
+        else if(cmd->type != AI_UART_MSG_PONG)
+        {
+            send_ack(cmd->seq, AI_UART_ACK_FAILED);
+        }
+        return;
+    }
     mark_peer_rx();
     switch(cmd->type)
     {
@@ -637,13 +699,13 @@ static void uart_irq_handler(void)
 
 int ai_uart_i2s_peer_ready(void)
 {
-    return peer_ready ? 1 : 0;
+    return (link_state == AI_LINK_READY) ? 1 : 0;
 }
 
 void ai_uart_i2s_on_audio_ready(void)
 {
     i2s_rx_ready = 1;
-    if(peer_ready)
+    if(link_state == AI_LINK_READY)
     {
         send_firmware_info();
     }
@@ -702,17 +764,23 @@ static void heartbeat_task(void *arg)
             last_ping = now;
             send_frame(AI_UART_MSG_PING, heartbeat, sizeof(heartbeat));
         }
-        if(peer_ready && (now - last_peer_tick) >= pdMS_TO_TICKS(AI_UART_PEER_TIMEOUT_MS))
+        if(!timeout_event_queued &&
+           ((link_state == AI_LINK_STOPPING) ||
+            ((link_state == AI_LINK_READY) &&
+             ((now - last_peer_tick) >= pdMS_TO_TICKS(AI_UART_PEER_TIMEOUT_MS)))))
         {
-            peer_ready = 0;
-            firmware_info_sent = 0;
-            stop_downlink();
-            audio_pre_rslt_stop();
-            current_state = AI_UART_STATE_WAKEUP_WAIT;
-            set_conversation_state(CI_CONVERSATION_STATE_INACTIVE);
-            mprintf("[AI_UART] peer timeout\r\n");
+            sys_msg_t event;
+            memset(&event, 0, sizeof(event));
+            event.msg_type = SYS_MSG_TYPE_AI_UART_TIMEOUT;
+            /* Publish ownership before enqueue: the higher-priority system
+             * owner can consume the event before send_msg_to_sys_task returns. */
+            timeout_event_queued = 1;
+            if(pdPASS != send_msg_to_sys_task(&event, NULL))
+            {
+                timeout_event_queued = 0;
+            }
         }
-        if(peer_ready && i2s_rx_ready && firmware_info_sent &&
+        if((link_state == AI_LINK_READY) && i2s_rx_ready && firmware_info_sent &&
            (now - last_firmware_info_tick) >=
                pdMS_TO_TICKS(AI_UART_FIRMWARE_INFO_INTERVAL_MS))
         {
@@ -751,7 +819,7 @@ bool ai_uart_i2s_conversation_active(void)
 {
     bool active;
     taskENTER_CRITICAL();
-    active = peer_ready && (conversation_state != CI_CONVERSATION_STATE_INACTIVE) &&
+    active = (link_state == AI_LINK_READY) && (conversation_state != CI_CONVERSATION_STATE_INACTIVE) &&
         ((xTaskGetTickCount() - conversation_state_tick) < pdMS_TO_TICKS(5000));
     taskEXIT_CRITICAL();
     return active;

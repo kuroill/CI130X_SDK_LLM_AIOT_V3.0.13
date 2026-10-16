@@ -194,6 +194,9 @@ typedef struct
 void iis_init(void);
 
 void iis_tx_enable(uint32_t iis_base,iis_tx_channal_t cha,FunctionalState cmd);
+/* Task-side, serialized TX control: 0 = loaded, 1 = pending external clock.
+ * Never overwrite an unacknowledged load or wait for a stopped slave clock. */
+int iis_tx_try_enable(uint32_t iis_base, iis_tx_channal_t cha, FunctionalState cmd);
 void iis_tx_l_mute(uint32_t iis_base,iis_tx_channal_t cha,FunctionalState cmd);
 void iis_tx_r_mute(uint32_t iis_base,iis_tx_channal_t cha,FunctionalState cmd);
 void iis_tx_chk(uint32_t iis_base,iis_tx_channal_t cha,FunctionalState cmd);

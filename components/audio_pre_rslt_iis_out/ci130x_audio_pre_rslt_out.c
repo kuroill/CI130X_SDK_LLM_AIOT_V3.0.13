@@ -54,6 +54,11 @@ static void uart_dma_read_irq_callback(void)
 }
 
 static audio_pre_init_tmp_t sg_init_tmp_str;
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+/* The producer and link-loss owner must never borrow/reclaim PCM concurrently.
+ * Both paths try once; the ASR task and UART heartbeat never wait on this lock. */
+static SemaphoreHandle_t uplink_mutex;
+#endif
 
 #define PI (3.1416926f)
 void sine_wave_generate(int16_t *sine_wave, uint32_t sample_rate, uint32_t wave_fre, uint32_t point_num)
@@ -418,6 +423,10 @@ void audio_pre_rslt_out_play_card_init(void)
     sg_init_tmp_str.write_data_cnt = 0;
     sg_init_tmp_str.send_data_cnt = 0;
     memset(sg_init_tmp_str.codec_start_flag,false,MAX_CODEC_NUM);
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+    uplink_mutex = xSemaphoreCreateMutex();
+    CI_ASSERT(uplink_mutex, "uplink lifecycle mutex\r\n");
+#endif
 #if DEBUG_AUDIO_UART_UPLOAD_EN
     uart_send_voice_init();
     tmp_voice_addr = pvPortMalloc(block_size);
@@ -453,9 +462,16 @@ void codec_output_ctl(int codec_index)
          * zero gaps instead of repeated stop/rebuffer gaps seen by ESP VAD. */
         if(!sg_init_tmp_str.codec_start_flag[codec_index] && (cnt > 10))
         {
-            cm_start_codec(codec_index, CODEC_OUTPUT);
-            sg_init_tmp_str.codec_start_flag[codec_index] = true;
-            mprintf("[AI_I2S] continuous uplink started prefillFrames=%d\r\n", cnt);
+            int result = cm_try_start_slave_output(codec_index);
+            if(result == 0)
+            {
+                sg_init_tmp_str.codec_start_flag[codec_index] = true;
+                mprintf("[AI_I2S] continuous uplink started prefillFrames=%d\r\n", cnt);
+            }
+            else if(result < 0)
+            {
+                mprintf("[AI_I2S] start failed codec=%d reason=invalid_slave_output\r\n", codec_index);
+            }
         }
         return;
     }
@@ -637,10 +653,18 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
     int num = block_size / sizeof(int16_t) / 2;
     report_aec_path_levels(p_wrapfft_audio, (uint32_t)num);
 #if AI_UART_CONTROL_EN
-    if(!ai_uart_i2s_peer_ready())
+    if(!ai_uart_i2s_peer_ready() || !uplink_mutex ||
+       (pdTRUE != xSemaphoreTake(uplink_mutex, 0)))
     {
         return;
     }
+    if(!ai_uart_i2s_peer_ready())
+    {
+        xSemaphoreGive(uplink_mutex);
+        return;
+    }
+    /* Retry a pending hardware start even when all prefill buffers are full. */
+    codec_output_ctl(PLAY_PRE_AUDIO_CODEC_ID);
 #endif
 #if IIS_UPLOAD_IS_WAKEUP
     if ((gCiasAiotRunParam.is_wake_up_flag || gCiasAiotRunParam.is_always_iis_flag))  
@@ -649,6 +673,9 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
         cm_get_pcm_buffer(PLAY_PRE_AUDIO_CODEC_ID, &write_pcm_addr, 0); // TODO HSL
         if (0 == write_pcm_addr)
         {
+#if AI_UART_CONTROL_EN
+            xSemaphoreGive(uplink_mutex);
+#endif
             return;
         }
         int16_t *pcm_data_p = (int16_t *)write_pcm_addr;
@@ -678,6 +705,9 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
     codec_output_ctl(PLAY_PRE_AUDIO_CODEC_ID);
     sg_init_tmp_str.send_data_cnt++;
     sg_init_tmp_str.write_data_cnt++;
+#if AI_UART_CONTROL_EN
+    xSemaphoreGive(uplink_mutex);
+#endif
 }
 #elif USE_AUDIO_UPLOAD_BY_HPOUT
 void audio_pre_rslt_upload_by_hpout(int16_t *left, int16_t *right, ci_wrapfft_audio *p_wrapfft_audio)
@@ -905,8 +935,28 @@ void audio_pre_rslt_write_data(int16_t *left, int16_t *right, uint32_t wrapfft_a
  * @brief 语音前处理输出停止
  *
  */
-void audio_pre_rslt_stop(void)
+int audio_pre_rslt_stop(void)
 {
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+    /* Initialization has not exposed a producer yet. */
+    if(!uplink_mutex)
+    {
+        return 1;
+    }
+    if(pdTRUE != xSemaphoreTake(uplink_mutex, 0))
+    {
+        return 0;
+    }
+    int result = cm_cancel_slave_output(PLAY_PRE_AUDIO_CODEC_ID);
+    if(result == 0)
+    {
+        sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] = false;
+        sg_init_tmp_str.send_data_cnt = 0;
+        mprintf("[AI_I2S] uplink canceled dma=off buffers=reclaimed iis=deferred\r\n");
+    }
+    xSemaphoreGive(uplink_mutex);
+    return (result == 0) ? 1 : ((result > 0) ? 0 : -1);
+#else
 #if USE_IIS1_OUT_PRE_RSLT_AUDIO
     cm_stop_codec(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT);
     sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] = false;
@@ -916,6 +966,8 @@ void audio_pre_rslt_stop(void)
     cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
 #endif
     sg_init_tmp_str.send_data_cnt = 0;
+    return 1;
+#endif
 }
 
 /**
@@ -924,7 +976,9 @@ void audio_pre_rslt_stop(void)
  */
 void audio_pre_rslt_start(void)
 {
+#if !(AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS)
     sg_init_tmp_str.send_data_cnt = 0;
+#endif
 }
 
 /********** (C) COPYRIGHT Chipintelli Technology Co., Ltd. *****END OF FILE****/

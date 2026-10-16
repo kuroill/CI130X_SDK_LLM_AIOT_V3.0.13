@@ -577,6 +577,9 @@ uint32_t deal_userdef_msg(sys_msg_t *msg)
     case SYS_MSG_TYPE_AI_UART:
         ai_uart_i2s_handle_command(&msg->msg_data.ai_uart_data);
         break;
+    case SYS_MSG_TYPE_AI_UART_TIMEOUT:
+        ai_uart_i2s_handle_timeout();
+        break;
     /* 按键消息 */
     case SYS_MSG_TYPE_KEY:
     {

@@ -169,6 +169,23 @@ void iis_wait_load_ctrl(uint32_t iis_base)
  * @param cha IIS发送通道
  * @param cmd 是否使能
  */
+int iis_tx_try_enable(uint32_t iis_base, iis_tx_channal_t cha, FunctionalState cmd)
+{
+    iis_register_p iis = (iis_register_p)iis_base;
+    uint32_t enabled = (cmd == ENABLE) ? 1U : 0U;
+    if(iis->iis_load_ctrl.val)
+    {
+        return 1;
+    }
+    if(iis->iis_tx_ctrl[cha].tx_en == enabled)
+    {
+        return 0;
+    }
+    iis->iis_tx_ctrl[cha].tx_en = enabled;
+    iis->iis_load_ctrl.tx_load_en = 1;
+    return 1;
+}
+
 void iis_tx_enable(uint32_t iis_base,iis_tx_channal_t cha,FunctionalState cmd)
 {
     iis_register_p iis = (iis_register_p)iis_base;
