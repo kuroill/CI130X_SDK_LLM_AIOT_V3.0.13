@@ -195,8 +195,10 @@ extern int cm_stop_codec(int codec_index, io_direction_t io_dir);
  * Try-start returns -2 when called from interrupt context.
  * Cancel stops only this TX DMA, returns its buffers without a clock/drain wait,
  * and records the pending IIS disable. The next try-start completes that disable
- * before enabling TX. RX, internal ADC/DAC and the shared DMA remain running. */
-extern int cm_try_start_slave_output(int codec_index);
+ * before enabling TX. RX, internal ADC/DAC and the shared DMA remain running.
+ * Start arms DMA before TX, preserving the SDK order. prefill_buffers applies
+ * only while stopped; pending starts progress even after DMA consumes prefill. */
+extern int cm_try_start_slave_output(int codec_index, unsigned int prefill_buffers);
 extern int cm_cancel_slave_output(int codec_index);
 
 extern int cm_read_codec(int codec_index, uint32_t * data_addr, uint32_t * data_size);

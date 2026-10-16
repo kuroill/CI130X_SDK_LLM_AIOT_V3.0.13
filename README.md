@@ -44,11 +44,18 @@ make clean; make -r -j8
 时钟恢复后先完成旧禁用再启用 TX；不复位共享 IISDMA、ADC 或本地 DAC。
 内部 DAC 的正常播放、FINISH 排空和 AEC 尾音流程保留。
 
+上行启动恢复修改前 `895785f` 的硬件顺序：预填至少 11 帧后，先设置 DMA
+地址并使能 DMA/中断，再提交 IIS TX 启用。`95a2be6`、`b9e6547` 中先等待
+TX 装载完成才开 DMA 的顺序已修正。STARTING 期间 DMA 中断正常轮转缓冲区；
+后续装载轮询不重复初始化 DMA，也不重新要求积满 11 帧。启动中断链仍按同一
+取消路径归还缓冲区，保留无时钟时的非阻塞 OTA 恢复能力。
+
 AIOT 音频数据会经核间 mailbox 回调进入主核，IIS 上行回调同时支持中断和任务
 上下文。回调只同步复制 PCM，使用二值信号量及对应的 `FromISR` 接口与清理互斥，
 codec 和队列初始化完成后才开放，不执行 IIS 启停，不保存算法输入指针。
-现有心跳任务每五十毫秒检查上行预填，
-只提交一份合并的启动事件；系统消息任务负责实际启动及缺时钟时的后续重试。
+现有心跳任务每五十毫秒检查尚未完成的上行启动，
+只提交一份合并的启动事件；系统消息任务和 codec 状态负责首次预填、实际启动及
+缺时钟时的后续重试，已消耗预填的 STARTING 不再被预填门槛拦住。
 队列已填满、消息队列繁忙、旧握手已失效时仍能正确重试或丢弃过期启动工作。
 
 此前 `start failed ... invalid_slave_output` 将非法配置和中断上下文混为一类。
@@ -65,7 +72,8 @@ python3 script/test_iis_peer_recovery.py
 Windows 正式构建后，先在单台验证机检查：
 
 1. 启动后先不唤醒，确认出现
-   `[AI_I2S] continuous uplink started prefillFrames=... owner=system context=task`，
+   `[AI_I2S] uplink armed codec=0 dma=on order=dma_then_tx`，随后出现
+   `[AI_I2S] continuous uplink started bufferedFrames=... owner=system context=task`，
    无持续 `start failed` / `no pcm buffer`。然后唤醒并说完整短句，联网后应有非空
    ASR 转写和语音回复；连续十轮验证回复播放、播放期打断与连续对话，音量和 AEC
    行为应与升级前一致。未配网开发板先用此启动日志验证 CI 本地上行启动。
@@ -81,6 +89,11 @@ Windows 正式构建后，先在单台验证机检查：
    `ciReady=true` 但 `ciBootHealthReady=false` 优先查 CI 初始化/清理，
    Guru Meditation/WDT/Backtrace 则按 ESP 崩溃排查。
 
+没有 `uplink armed` 时，检查 `peer ready`、预填生产和系统启动事件；有 `uplink armed`
+但没有 `continuous uplink started` 时，检查 ESP BCLK/LRCK、IIS 装载状态和任务重试。
+出现启动完成日志仍持续 `no pcm buffer` 时，检查 TX DMA 中断与缓冲区轮转；该日志
+表示固定 PCM 池借不到缓冲区，不能单凭它认定堆分配失败或整颗 CI 崩溃。
+
 失败时分别记录 CI 的启动/清理日志和 ESP 的 CI 版本、peer ready、WAKE_DETECTED、
 语音上传日志：`interrupt_context` 表示启动调用者错误，`invalid_slave_output`
 表示 codec 注册/板级配置与该接口不匹配，`buffer_ownership` 表示缓冲区归还异常。
@@ -88,9 +101,10 @@ Windows 正式构建后，先在单台验证机检查：
 不能再只凭 UART 心跳或 OTA 成功回执认定收音正常。
 
 主机回归覆盖实际中断/任务 PCM 生产代码、任务专用 API 误用、启动事件合并、
-消息队列压力及抢占、过期事件、满预填池恢复和两千次反复重连。
+消息队列压力及抢占、过期事件、DMA 先于 TX、STARTING 中断/取消、预填耗尽后继续
+完成启动、共享 RX 装载、满预填池恢复和两千次反复重连。
 它不验证芯片实际时序、音质或固件链接尺寸。CI 正式镜像必须在 Windows SDK
-环境重新生成，并使用可区分的新版本号；本次 mailbox 修复没有修改 ESP32 源码，
+环境重新生成，并核对新启动日志/镜像版本；本次启动顺序修复没有修改 ESP32 源码，
 无需为此单独重建 ESP。原有已打包文件不包含这些源码修改。
 
 *版权归chipintelli公司所有，未经允许不得使用或修改*

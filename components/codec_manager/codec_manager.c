@@ -42,7 +42,7 @@ typedef enum
 
 typedef struct
 {
-    cm_slave_output_state_t slave_output_state;
+    volatile cm_slave_output_state_t slave_output_state;
     void (*callback_func)(void);                    //指针数组，用于保存每个CODEC的事件回调函数    
     cm_codec_hw_info_t codec_hw_info;               //用于保存CODEC接口（IIS,DMA,IIC等）相关配置。
     cm_sound_info_t play_sound_info;                //用于保存音频相关配置信息。
@@ -609,7 +609,7 @@ int cm_config_codec(int codec_index, io_direction_t io_dir, cm_sound_info_t * so
     return 0;
 }
 
-static void cm_start_output_dma(codec_info_t *code_info_p)
+static void cm_start_output_dma(codec_info_t *code_info_p, cm_slave_output_state_t state)
 {
     iis_base_t IISx = code_info_p->codec_hw_info.output_iis.IISx;
     IISDMAChax iis_dma_channel = get_iis_dma_channel(IISx);
@@ -642,7 +642,7 @@ static void cm_start_output_dma(codec_info_t *code_info_p)
     IISDMA_RXTXClear(IISDMA0,iis_dma_channel,IISxDMA_TX_EN);
     IISDMA_INT_Clear(IISDMA0, (1U << (10U + iis_dma_channel)) |
         (1U << (1U + iis_dma_channel * 2U + IISxDMA_TX_EN)));
-    code_info_p->slave_output_state = CM_SLAVE_OUTPUT_RUNNING;
+    code_info_p->slave_output_state = state;
     IISDMA_ChannelENConfig(IISDMA0,iis_dma_channel,IISxDMA_TX_EN,ENABLE);
     IISDMA_ADDRRollBackINT(IISDMA0,iis_dma_channel,IISxDMA_TX_EN,ENABLE);
 
@@ -673,7 +673,7 @@ int cm_start_codec(int codec_index, io_direction_t io_dir)
     else
     {
         IISx = code_info_p->codec_hw_info.output_iis.IISx;
-        cm_start_output_dma(code_info_p);
+        cm_start_output_dma(code_info_p, CM_SLAVE_OUTPUT_RUNNING);
         iis_tx_enable(IISx,code_info_p->codec_hw_info.output_iis.tx_cha,ENABLE);
     }
 
@@ -693,7 +693,7 @@ static int cm_is_external_slave_output(int codec_index)
         cm.codec_info[codec_index].play_buffer_queue.busy_queue;
 }
 
-int cm_try_start_slave_output(int codec_index)
+int cm_try_start_slave_output(int codec_index, unsigned int prefill_buffers)
 {
     if(check_curr_trap())
     {
@@ -709,6 +709,8 @@ int cm_try_start_slave_output(int codec_index)
     }
     codec_info_t *info = &cm.codec_info[codec_index];
     cm_iis_info_t *iis = &info->codec_hw_info.output_iis;
+    int armed = 0;
+    int result = 0;
     if(info->slave_output_state == CM_SLAVE_OUTPUT_DISABLING)
     {
         if(iis_tx_try_enable(iis->IISx, iis->tx_cha, DISABLE))
@@ -718,20 +720,35 @@ int cm_try_start_slave_output(int codec_index)
         }
         info->slave_output_state = CM_SLAVE_OUTPUT_STOPPED;
     }
-    if(info->slave_output_state != CM_SLAVE_OUTPUT_RUNNING)
+    if(info->slave_output_state == CM_SLAVE_OUTPUT_STOPPED)
     {
-        info->slave_output_state = CM_SLAVE_OUTPUT_STARTING;
-        if(iis_tx_try_enable(iis->IISx, iis->tx_cha, ENABLE))
+        if(uxQueueMessagesWaiting(info->play_buffer_queue.busy_queue) < prefill_buffers)
         {
             xSemaphoreGive(cm.semaphore);
             return 1;
         }
+        /* Preserve the working SDK order from 895785f: arm DMA before TX.
+         * Arm once; polling a pending IIS load must never pop another buffer
+         * or reset the DMA addresses already owned by the interrupt handler. */
         portENTER_CRITICAL();
-        cm_start_output_dma(info);
+        cm_start_output_dma(info, CM_SLAVE_OUTPUT_STARTING);
         portEXIT_CRITICAL();
+        armed = 1;
+    }
+    if(info->slave_output_state == CM_SLAVE_OUTPUT_STARTING)
+    {
+        result = iis_tx_try_enable(iis->IISx, iis->tx_cha, ENABLE);
+        if(!result)
+        {
+            info->slave_output_state = CM_SLAVE_OUTPUT_RUNNING;
+        }
     }
     xSemaphoreGive(cm.semaphore);
-    return 0;
+    if(armed)
+    {
+        mprintf("[AI_I2S] uplink armed codec=%d dma=on order=dma_then_tx\r\n", codec_index);
+    }
+    return result;
 }
 
 int cm_cancel_slave_output(int codec_index)
@@ -1179,9 +1196,11 @@ void cm_output_interrupt_handler(IISDMAChax dma_channel, BaseType_t * xHigherPri
     codec_info_t * code_info_p = &(cm.codec_info[codec_index]);
     play_buffer_queue_t * play_buffer_queue = &(code_info_p->play_buffer_queue);
 
-    /* A late canceled slave-TX IRQ must never return a reclaimed buffer twice. */
+    /* DMA owns buffers from STARTING onward, before TX load is acknowledged.
+     * A late canceled slave-TX IRQ must never return reclaimed buffers twice. */
     if((code_info_p->codec_hw_info.output_iis.IISx == IIS0) &&
        (code_info_p->codec_hw_info.output_iis.iis_mode_sel == IIS_SLAVE) &&
+       (code_info_p->slave_output_state != CM_SLAVE_OUTPUT_STARTING) &&
        (code_info_p->slave_output_state != CM_SLAVE_OUTPUT_RUNNING))
     {
         return;

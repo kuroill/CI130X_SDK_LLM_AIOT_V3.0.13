@@ -518,7 +518,8 @@ void codec_output_ctl(int codec_index)
 }
 
 /* Called by the existing heartbeat task, never by the mailbox producer.
- * Retry hardware progress even if every prefill buffer is already full. */
+ * The codec owner applies prefill once. Pending starts must keep progressing
+ * with both a full pool and an empty queue after DMA has consumed the prefill. */
 void audio_pre_rslt_request_start(void)
 {
 #if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
@@ -528,8 +529,7 @@ void audio_pre_rslt_request_start(void)
     {
         return;
     }
-    int needed = !sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] &&
-        (cm_get_codec_busy_buffer_number(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT) > 10);
+    int needed = !sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID];
     if(needed)
     {
         /* Set before enqueue: the system owner can preempt the sender. */
@@ -557,13 +557,13 @@ void audio_pre_rslt_handle_start(void)
     {
         int cnt = cm_get_codec_busy_buffer_number(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT);
         if(ai_uart_i2s_peer_ready() &&
-           !sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] && (cnt > 10))
+           !sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID])
         {
-            int result = cm_try_start_slave_output(PLAY_PRE_AUDIO_CODEC_ID);
+            int result = cm_try_start_slave_output(PLAY_PRE_AUDIO_CODEC_ID, 11);
             if(result == 0)
             {
                 sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] = true;
-                mprintf("[AI_I2S] continuous uplink started prefillFrames=%d owner=system context=task\r\n", cnt);
+                mprintf("[AI_I2S] continuous uplink started bufferedFrames=%d owner=system context=task\r\n", cnt);
             }
             else if(result < 0)
             {

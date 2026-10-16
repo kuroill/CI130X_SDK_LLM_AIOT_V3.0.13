@@ -95,9 +95,13 @@ static void xSemaphoreGiveFromISR(Mutex *m, BaseType_t *w) {
 
 
 def codec_fixture():
-    # Actual codec private state and the actual new register control function.
+    # Actual codec private state, IIS register layout and register control.
     types = CODEC[CODEC.index("typedef struct"):CODEC.index("extern unsigned char send_buf_addr")]
-    source = COMMON + r'''
+    registers = IIS[IIS.index("typedef volatile struct iis_register"):IIS.index("void iis_wait_load_ctrl")]
+    source = COMMON + registers + r'''
+#include <stddef.h>
+_Static_assert(offsetof(iis_register_t,iis_tx_ctrl)==0x10,"TX register offset");
+_Static_assert(offsetof(iis_register_t,iis_load_ctrl)==0x30,"LOAD register offset");
 #define uint32_t uintptr_t
 #define int32_t intptr_t
 #define MAX_CODEC_NUM 3
@@ -126,10 +130,6 @@ static int xQueueReceive(Queue *q, void *p, unsigned wait) {
 static int xQueueSendFromISR(Queue *q, const void *p, BaseType_t *w) { return xQueueSend(q,p,0); }
 static int xQueueReceiveFromISR(Queue *q, void *p, BaseType_t *w) { return xQueueReceive(q,p,0); }
 static unsigned uxQueueMessagesWaiting(Queue *q) { assert(!in_isr); return q->count; }
-typedef volatile struct {
-    struct { unsigned tx_en; } iis_tx_ctrl[1];
-    union { struct { unsigned tx_load_en:1; }; unsigned val; } iis_load_ctrl;
-} iis_register_t, *iis_register_p;
 static iis_register_t regs;
 #define IIS0 ((uintptr_t)&regs)
 #define IIS1 1U
@@ -143,18 +143,20 @@ typedef struct {
 typedef int cm_sound_info_t;
 typedef struct { unsigned buffer_size, block_size, buffer_num; } cm_play_buffer_info_t;
 typedef int cm_record_buffer_info_t;
-static int dma_tx, dma_rx = 1, global_dma = 1, interrupt_enabled, hardware_calls;
+static int dma_tx, dma_rx = 1, global_dma = 1, interrupt_enabled, hardware_calls, dma_arms;
+static uintptr_t dma_slots[2];
 static int check_curr_trap(void) { return in_isr; }
 static void IISDMA_ChannelENConfig(int d, int c, int io, int on) {
     assert(c==0 && io==IISxDMA_TX_EN); dma_tx=on; ++hardware_calls;
+    if(on) ++dma_arms;
 }
 static void IISDMA_ADDRRollBackINT(int d, int c, int io, int on) { assert(c==0 && io==IISxDMA_TX_EN); interrupt_enabled=on; }
 static void IISDMA_ChannelIntENConfig(int d, int c, int io, int on) { assert(c==0 && io==IISxDMA_TX_EN && !on); }
 static void IISxDMA_TXADDRRollbackInterruptClear(int d,int c,int a) { assert(c==0); }
 static void IISDMA_RXTXClear(int d,int c,int io) { assert(c==0 && io==IISxDMA_TX_EN); }
 static void IISDMA_INT_Clear(int d, unsigned bits) { assert(bits==((1U<<10)|(1U<<2))); }
-static void IISxDMA_TADDR0(int d,int c,uintptr_t addr) { assert(c==0); }
-static void IISxDMA_TADDR1(int d,int c,uintptr_t addr) { assert(c==0); }
+static void IISxDMA_TADDR0(int d,int c,uintptr_t addr) { assert(c==0); dma_slots[0]=addr; }
+static void IISxDMA_TADDR1(int d,int c,uintptr_t addr) { assert(c==0); dma_slots[1]=addr; }
 static void IISDMA_EN(int d, int on) { assert(on==ENABLE); global_dma=on; }
 static int IISDMA_TX_ADDR_Get(int d,int c) { return 0; }
 #define CI_ASSERT(x, ...) assert(x)
@@ -192,46 +194,71 @@ static void reset(void) {
     p->play_buffer_queue.idle_queue=&idle; p->play_buffer_queue.busy_queue=&busy;
     p->play_buffer_info=(cm_play_buffer_info_t){1024,1024,22};
     for(unsigned i=0;i<22;++i) { uintptr_t a=0x10000+i*1024; assert(xQueueSend(&idle,&a,0)); }
-    dma_tx=0; hardware_calls=0; in_isr=0;
+    dma_tx=0; hardware_calls=0; dma_arms=0; in_isr=0;
 }
 static void enqueue(unsigned count) {
     while(count--) { uintptr_t a; assert(xQueueReceive(&idle,&a,0)); assert(xQueueSend(&busy,&a,0)); }
 }
 int main(void) {
-    reset(); enqueue(22);
-    assert(cm_try_start_slave_output(0)==1);
-    for(int i=0;i<10000;++i) assert(cm_try_start_slave_output(0)==1);
-    assert(!dma_tx && busy.count==22 && !lock.held); pool();
-    regs.iis_load_ctrl.val=0; /* external clocks finally acknowledge enable */
-    assert(cm_try_start_slave_output(0)==0 && dma_tx); pool();
-    BaseType_t w=0; cm_output_interrupt_handler(0,&w); pool();
+    reset(); enqueue(10);
+    assert(cm_try_start_slave_output(0,11)==1);
+    assert(!dma_tx && !regs.iis_load_ctrl.val && busy.count==10); pool();
+    enqueue(1);
+    assert(cm_try_start_slave_output(0,11)==1);
+    /* Preserve the known-good 895785f ordering: DMA is armed while the first
+     * TX enable load is pending, with the first PCM buffer already owned. */
+    assert(dma_tx && dma_arms==1 && busy.count==10 && interrupt_enabled);
+    assert(regs.iis_load_ctrl.val==(1U<<10)); pool();
+    uintptr_t first=dma_slots[0], second=dma_slots[1];
+    for(int i=0;i<10000;++i) assert(cm_try_start_slave_output(0,11)==1);
+    assert(dma_arms==1 && busy.count==10 && !lock.held);
+    assert(dma_slots[0]==first && dma_slots[1]==second); pool();
+    BaseType_t w=0;
+    for(int i=0;i<30;++i) { cm_output_interrupt_handler(0,&w); pool(); }
+    assert(busy.count==0 && idle.count==22); /* IRQs work during STARTING */
+    regs.iis_load_ctrl.val=0; /* clocks acknowledge enable before next task poll */
+    assert(cm_try_start_slave_output(0,11)==0 && dma_tx && dma_arms==1); pool();
+    assert(cm.codec_info[0].slave_output_state==CM_SLAVE_OUTPUT_RUNNING);
+    for(int i=0;i<100;++i) assert(cm_try_start_slave_output(0,11)==0);
+    assert(dma_arms==1); /* no re-prefill or repeated DMA start on underrun */
     assert(cm_cancel_slave_output(0)==0 && !dma_tx && !interrupt_enabled); pool();
     assert(idle.count==22 && busy.count==0);
     for(int i=0;i<10000;++i) assert(cm_cancel_slave_output(0)==0);
     cm_output_interrupt_handler(0,&w); pool(); /* stale IRQ cannot double free */
-    assert(cm_try_start_slave_output(0)==1 && !dma_tx);
+    assert(cm_try_start_slave_output(0,11)==1 && !dma_tx);
     regs.iis_load_ctrl.val=0; enqueue(11);
-    assert(cm_try_start_slave_output(0)==1 && !dma_tx); /* new enable submitted */
+    assert(cm_try_start_slave_output(0,11)==1 && dma_tx); /* DMA before new enable */
     regs.iis_load_ctrl.val=0;
-    assert(cm_try_start_slave_output(0)==0 && dma_tx); pool();
+    assert(cm_try_start_slave_output(0,11)==0 && dma_tx); pool();
     for(int i=0;i<30;++i) { cm_output_interrupt_handler(0,&w); pool(); }
     assert(cm_cancel_slave_output(0)==0); pool(); /* zero buffer is never returned */
 
-    reset(); enqueue(11); assert(cm_try_start_slave_output(0)==1);
+    reset(); enqueue(22); assert(cm_try_start_slave_output(0,11)==1 && dma_tx);
+    for(int i=0;i<4;++i) { cm_output_interrupt_handler(0,&w); pool(); }
     assert(cm_cancel_slave_output(0)==0); pool(); /* cancel pending enable */
-    assert(cm_try_start_slave_output(0)==1 && regs.iis_tx_ctrl[0].tx_en==1 && !dma_tx);
+    cm_output_interrupt_handler(0,&w); pool(); /* stale IRQ after STARTING cancel */
+    enqueue(11);
+    assert(cm_try_start_slave_output(0,11)==1 && regs.iis_tx_ctrl[0].tx_en==1 && !dma_tx);
     regs.iis_load_ctrl.val=0;
-    assert(cm_try_start_slave_output(0)==1 && regs.iis_tx_ctrl[0].tx_en==0 && !dma_tx);
+    assert(cm_try_start_slave_output(0,11)==1 && regs.iis_tx_ctrl[0].tx_en==0 && !dma_tx);
     regs.iis_load_ctrl.val=0;
-    assert(cm_try_start_slave_output(0)==1 && regs.iis_tx_ctrl[0].tx_en==1 && !dma_tx);
+    assert(cm_try_start_slave_output(0,11)==1 && regs.iis_tx_ctrl[0].tx_en==1 && dma_tx);
     regs.iis_load_ctrl.val=0;
-    assert(cm_try_start_slave_output(0)==0 && dma_tx); pool();
+    assert(cm_try_start_slave_output(0,11)==0 && dma_tx); pool();
+
+    reset(); enqueue(11); regs.iis_load_ctrl.val=1; /* pending RX load on shared IIS0 */
+    assert(cm_try_start_slave_output(0,11)==1 && dma_tx && regs.iis_load_ctrl.val==1);
+    assert(!regs.iis_tx_ctrl[0].tx_en); pool();
+    regs.iis_load_ctrl.val=0;
+    assert(cm_try_start_slave_output(0,11)==1 && dma_arms==1 && regs.iis_tx_ctrl[0].tx_en);
+    regs.iis_load_ctrl.val=0;
+    assert(cm_try_start_slave_output(0,11)==0 && dma_arms==1); pool();
 
     for(int i=0;i<2000;++i) {
         assert(cm_cancel_slave_output(0)==0); pool();
         enqueue(11); regs.iis_load_ctrl.val=0;
-        assert(cm_try_start_slave_output(0)==1);
-        regs.iis_load_ctrl.val=0; assert(cm_try_start_slave_output(0)==0); pool();
+        assert(cm_try_start_slave_output(0,11)==1 && dma_tx);
+        regs.iis_load_ctrl.val=0; assert(cm_try_start_slave_output(0,11)==0); pool();
         cm_output_interrupt_handler(0,&w); pool();
     }
     assert(cm_cancel_slave_output(0)==0); pool();
@@ -239,14 +266,14 @@ int main(void) {
     assert(cm_cancel_slave_output(0)==-1 && !lock.held); /* ownership error is visible */
     assert(xQueueSend(&idle,&borrowed,0)); assert(cm_cancel_slave_output(0)==0); pool();
     lock.held=1; int calls=hardware_calls;
-    assert(cm_cancel_slave_output(0)==1 && cm_try_start_slave_output(0)==1 && calls==hardware_calls);
+    assert(cm_cancel_slave_output(0)==1 && cm_try_start_slave_output(0,11)==1 && calls==hardware_calls);
     lock.held=0; in_isr=1;
-    assert(cm_cancel_slave_output(0)==-1 && cm_try_start_slave_output(0)==-2);
+    assert(cm_cancel_slave_output(0)==-1 && cm_try_start_slave_output(0,11)==-2);
     in_isr=0;
     cm.codec_info[0].codec_hw_info.output_iis.IISx=IIS1;
-    assert(cm_cancel_slave_output(0)==-1 && cm_try_start_slave_output(0)==-1);
-    assert(cm_cancel_slave_output(-1)==-1 && cm_try_start_slave_output(3)==-1);
-    puts("codec: no-clock start/cancel, pending-load ordering, 2000 reconnects, pool conservation, stale IRQ, ownership errors passed");
+    assert(cm_cancel_slave_output(0)==-1 && cm_try_start_slave_output(0,11)==-1);
+    assert(cm_cancel_slave_output(-1)==-1 && cm_try_start_slave_output(3,11)==-1);
+    puts("codec: DMA-before-TX, prefill only once, STARTING IRQs/cancel, shared RX load, 2000 reconnects, pool conservation passed");
 }
 '''
     return source
@@ -367,14 +394,16 @@ int main(void) {
     for(int i=0;i<100;++i) audio_pre_rslt_request_start();
     assert(posted_starts==1); /* one coalesced event while system owner is busy */
     deliver_start();
-    assert(!dma_tx && !uplink_start_event_queued); /* external clock load still pending */
+    assert(dma_tx && !uplink_start_event_queued); /* DMA armed before TX load completes */
+    BaseType_t w=0;
+    for(int i=0;i<30;++i) cm_output_interrupt_handler(0,&w);
+    assert(busy.count==0 && idle.count==22);
     regs.iis_load_ctrl.val=0;
-    poll_start(); /* owner retries even when all 22 buffers are full */
+    poll_start(); /* owner completes a pending start even after all prefill was consumed */
     assert(dma_tx && sg_init_tmp_str.codec_start_flag[0] && !producer_gate.held);
     calls=hardware_calls;
     for(int i=0;i<100;++i) poll_start();
     assert(calls==hardware_calls); /* no repeated DMA start */
-    BaseType_t w=0;
     for(int i=0;i<3;++i) cm_output_interrupt_handler(0,&w);
     produce(left,right,&audio,1);
     ready=0; unsigned count=busy.count;
