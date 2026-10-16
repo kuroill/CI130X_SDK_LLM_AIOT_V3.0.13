@@ -792,6 +792,7 @@ static void heartbeat_task(void *arg)
             dropped_commands = 0;
             mprintf("[AI_UART] command queue overflow dropped=%u\r\n", (unsigned int)dropped);
         }
+        audio_pre_rslt_request_start();
         report_aec_runtime();
         vTaskDelay(pdMS_TO_TICKS(AI_UART_TASK_POLL_MS));
     }

@@ -65,6 +65,8 @@ COMMON = r'''
 #define portTICK_PERIOD_MS 1
 #define mprintf(...) ((void)0)
 #define ci_logdebug(...) ((void)0)
+#define ci_logerr(...) ((void)0)
+#define portYIELD_FROM_ISR(w) ((void)(w))
 #define portENTER_CRITICAL() ((void)0)
 #define portEXIT_CRITICAL() ((void)0)
 #define taskENTER_CRITICAL() ((void)0)
@@ -72,13 +74,23 @@ COMMON = r'''
 typedef int BaseType_t;
 typedef unsigned UBaseType_t;
 typedef uint32_t TickType_t;
-typedef struct { int held; } Mutex;
+static int in_isr;
+typedef struct { int held, isr_safe; } Mutex;
 typedef Mutex *SemaphoreHandle_t;
 static BaseType_t xSemaphoreTake(Mutex *m, unsigned wait) {
+    assert(!in_isr && wait==0);
     if(m->held) return 0;
     m->held = 1; return 1;
 }
-static void xSemaphoreGive(Mutex *m) { assert(m->held); m->held = 0; }
+static void xSemaphoreGive(Mutex *m) { assert(!in_isr && m->held); m->held = 0; }
+static BaseType_t xSemaphoreTakeFromISR(Mutex *m, BaseType_t *w) {
+    assert(in_isr && m->isr_safe);
+    if(m->held) return 0;
+    m->held = 1; return 1;
+}
+static void xSemaphoreGiveFromISR(Mutex *m, BaseType_t *w) {
+    assert(in_isr && m->isr_safe && m->held); m->held = 0;
+}
 '''
 
 
@@ -113,7 +125,7 @@ static int xQueueReceive(Queue *q, void *p, unsigned wait) {
 }
 static int xQueueSendFromISR(Queue *q, const void *p, BaseType_t *w) { return xQueueSend(q,p,0); }
 static int xQueueReceiveFromISR(Queue *q, void *p, BaseType_t *w) { return xQueueReceive(q,p,0); }
-static unsigned uxQueueMessagesWaiting(Queue *q) { return q->count; }
+static unsigned uxQueueMessagesWaiting(Queue *q) { assert(!in_isr); return q->count; }
 typedef volatile struct {
     struct { unsigned tx_en; } iis_tx_ctrl[1];
     union { struct { unsigned tx_load_en:1; }; unsigned val; } iis_load_ctrl;
@@ -131,7 +143,7 @@ typedef struct {
 typedef int cm_sound_info_t;
 typedef struct { unsigned buffer_size, block_size, buffer_num; } cm_play_buffer_info_t;
 typedef int cm_record_buffer_info_t;
-static int in_isr, dma_tx, dma_rx = 1, global_dma = 1, interrupt_enabled, hardware_calls;
+static int dma_tx, dma_rx = 1, global_dma = 1, interrupt_enabled, hardware_calls;
 static int check_curr_trap(void) { return in_isr; }
 static void IISDMA_ChannelENConfig(int d, int c, int io, int on) {
     assert(c==0 && io==IISxDMA_TX_EN); dma_tx=on; ++hardware_calls;
@@ -228,7 +240,9 @@ int main(void) {
     assert(xQueueSend(&idle,&borrowed,0)); assert(cm_cancel_slave_output(0)==0); pool();
     lock.held=1; int calls=hardware_calls;
     assert(cm_cancel_slave_output(0)==1 && cm_try_start_slave_output(0)==1 && calls==hardware_calls);
-    lock.held=0; in_isr=1; assert(cm_cancel_slave_output(0)==-1); in_isr=0;
+    lock.held=0; in_isr=1;
+    assert(cm_cancel_slave_output(0)==-1 && cm_try_start_slave_output(0)==-2);
+    in_isr=0;
     cm.codec_info[0].codec_hw_info.output_iis.IISx=IIS1;
     assert(cm_cancel_slave_output(0)==-1 && cm_try_start_slave_output(0)==-1);
     assert(cm_cancel_slave_output(-1)==-1 && cm_try_start_slave_output(3)==-1);
@@ -250,6 +264,8 @@ def uplink_fixture():
 #include <stdbool.h>
 #define AI_UART_CONTROL_EN 1
 #define USE_AUDIO_UPLOAD_BY_IIS 1
+#define USE_IIS1_OUT_PRE_RSLT_AUDIO 1
+#define AUDIO_CAP_POINT_NUM_PER_FRM 4
 #define IIS_UPLOAD_IS_WAKEUP 0
 typedef struct { int16_t *asr_src_data; } ci_wrapfft_audio;
 static struct { unsigned block_size; } init_str;
@@ -259,8 +275,12 @@ static struct {
     unsigned send_data_cnt, write_data_cnt;
 } sg_init_tmp_str;
 static struct { int upload_audio_by_denoise; } gCiasAiotFuncParam;
-static Mutex producer_lock;
-static Mutex *uplink_mutex=&producer_lock;
+static Mutex producer_gate={.isr_safe=1};
+static Mutex *uplink_gate=&producer_gate;
+static Mutex *xSemaphoreCreateBinary(void) {
+    assert(!in_isr); producer_gate.held=1; return &producer_gate;
+}
+static volatile uint8_t uplink_start_event_queued;
 static int ready=1;
 #define PLAY_PRE_AUDIO_CODEC_ID 0
 #define CI_SS_AEC_WORK_STATE 0
@@ -268,56 +288,141 @@ static int aec_working;
 static int ciss_get(int key) { return aec_working; }
 static int ai_uart_i2s_peer_ready(void) { return ready; }
 static void report_aec_path_levels(ci_wrapfft_audio *a, unsigned count) {}
-static int cm_get_codec_busy_buffer_number(int id, int io) { return busy.count; }
-static void cm_get_pcm_buffer(int id, uintptr_t *p, unsigned wait) {
-    assert(wait==0); *p=0; (void)xQueueReceive(&idle,p,wait);
-}
-static int cm_write_codec(int id, void *p, unsigned wait) { assert(wait==0); return xQueueSend(&busy,&p,wait); }
 static int cm_start_codec(int id,int io) { assert(0 && "slave must use nonblocking lifecycle"); return 0; }
 static int cm_stop_codec(int id,int io) { assert(0 && "slave must use DMA cancellation"); return 0; }
 #define CODEC_OUTPUT 1
+typedef int io_direction_t;
+typedef struct { int msg_type; } sys_msg_t;
+enum { SYS_MSG_TYPE_AI_I2S_UPLINK_START=144 };
+static int queued_start, queue_full, inline_delivery, posted_starts;
+void audio_pre_rslt_handle_start(void);
+static void audio_pre_rslt_out_codec_init(void);
+static void ai_uart_i2s_on_audio_ready(void) { assert(!producer_gate.held); }
+static int send_msg_to_sys_task(sys_msg_t *event, void *w) {
+    assert(!in_isr && !producer_gate.held && event->msg_type==SYS_MSG_TYPE_AI_I2S_UPLINK_START);
+    if(queue_full) return 0;
+    ++posted_starts;
+    if(inline_delivery) audio_pre_rslt_handle_start();
+    else { assert(!queued_start); queued_start=1; }
+    return 1;
+}
 '''
-    for name in ("codec_output_ctl", "audio_pre_rslt_upload_by_iis", "audio_pre_rslt_stop", "audio_pre_rslt_start"):
+    for name in ("cm_get_pcm_buffer", "cm_write_codec", "cm_get_codec_busy_buffer_number"):
+        source += function(CODEC, name)
+    for name in ("uplink_try_take", "uplink_give", "codec_output_ctl", "audio_pre_rslt_request_start",
+                 "audio_pre_rslt_handle_start", "audio_pre_rslt_upload_by_iis",
+                 "audio_pre_rslt_stop", "audio_pre_rslt_start", "audio_pre_rslt_out_play_card_init"):
         source += function(UPLINK, name)
     source += r'''
+static void produce(int16_t *left,int16_t *right,ci_wrapfft_audio *audio,int isr) {
+    in_isr=isr;
+    audio_pre_rslt_upload_by_iis(left,right,audio);
+    assert(!producer_gate.held);
+    in_isr=0;
+}
+static void deliver_start(void) {
+    assert(queued_start && !in_isr);
+    queued_start=0;
+    audio_pre_rslt_handle_start();
+}
+static void poll_start(void) {
+    audio_pre_rslt_request_start();
+    if(queued_start) deliver_start();
+}
+static void audio_pre_rslt_out_codec_init(void) {
+    assert(producer_gate.held);
+    /* Publication is forbidden while codec initialization is incomplete. */
+    in_isr=1;
+    audio_pre_rslt_upload_by_iis(NULL,NULL,NULL);
+    in_isr=0;
+    audio_pre_rslt_request_start();
+    assert(!queued_start && producer_gate.held);
+}
 int main(void) {
     static int16_t pcm[22][512];
     int16_t left[4]={11,22,33,44}, right[4]={1,2,3,4};
     ci_wrapfft_audio audio={left};
+    reset();
+    audio_pre_rslt_out_play_card_init();
+    assert(!producer_gate.held && !queued_start);
     reset(); idle.count=0;
     for(int i=0;i<22;++i) { void *p=pcm[i]; assert(xQueueSend(&idle,&p,0)); }
     sg_init_tmp_str.init_str.block_size=16;
-    audio_pre_rslt_upload_by_iis(left,right,&audio);
+    /* The actual mailbox producer runs in ISR context. Task-only semaphore
+     * APIs fail in this fixture instead of silently working as in old mocks. */
+    produce(left,right,&audio,1);
     assert(pcm[0][0]==11 && pcm[0][1]==11 && pcm[0][6]==44 && pcm[0][7]==44);
     gCiasAiotFuncParam.upload_audio_by_denoise=1;
-    audio_pre_rslt_upload_by_iis(left,right,&audio);
+    produce(left,right,&audio,1);
     assert(pcm[1][0]==1 && pcm[1][1]==1 && pcm[1][6]==4 && pcm[1][7]==4);
     gCiasAiotFuncParam.upload_audio_by_denoise=0; aec_working=1;
-    audio_pre_rslt_upload_by_iis(left,right,&audio);
+    produce(left,right,&audio,1);
     assert(pcm[2][0]==1 && pcm[2][1]==1);
     aec_working=0;
-    for(int i=0;i<27;++i) audio_pre_rslt_upload_by_iis(left,right,&audio);
-    assert(busy.count==22 && !dma_tx && !producer_lock.held && !lock.held);
+    for(int i=0;i<27;++i) produce(left,right,&audio,1);
+    assert(busy.count==22 && !dma_tx && !producer_gate.held && !lock.held);
+    int calls=hardware_calls;
+    audio_pre_rslt_request_start();
+    assert(queued_start && uplink_start_event_queued && !dma_tx && calls==hardware_calls);
+    for(int i=0;i<100;++i) audio_pre_rslt_request_start();
+    assert(posted_starts==1); /* one coalesced event while system owner is busy */
+    deliver_start();
+    assert(!dma_tx && !uplink_start_event_queued); /* external clock load still pending */
     regs.iis_load_ctrl.val=0;
-    audio_pre_rslt_upload_by_iis(left,right,&audio);
-    assert(dma_tx && sg_init_tmp_str.codec_start_flag[0] && !producer_lock.held);
+    poll_start(); /* owner retries even when all 22 buffers are full */
+    assert(dma_tx && sg_init_tmp_str.codec_start_flag[0] && !producer_gate.held);
+    calls=hardware_calls;
+    for(int i=0;i<100;++i) poll_start();
+    assert(calls==hardware_calls); /* no repeated DMA start */
     BaseType_t w=0;
     for(int i=0;i<3;++i) cm_output_interrupt_handler(0,&w);
-    audio_pre_rslt_upload_by_iis(left,right,&audio);
+    produce(left,right,&audio,1);
     ready=0; unsigned count=busy.count;
-    audio_pre_rslt_upload_by_iis(left,right,&audio); assert(busy.count==count);
-    producer_lock.held=1; assert(audio_pre_rslt_stop()==0); producer_lock.held=0;
-    lock.held=1; assert(audio_pre_rslt_stop()==0 && !producer_lock.held); lock.held=0;
+    produce(left,right,&audio,1); assert(busy.count==count);
+    producer_gate.held=1;
+    in_isr=1; audio_pre_rslt_upload_by_iis(left,right,&audio); in_isr=0;
+    assert(producer_gate.held && busy.count==count); /* ISR never waits for the owner */
+    assert(audio_pre_rslt_stop()==0); producer_gate.held=0;
+    lock.held=1; assert(audio_pre_rslt_stop()==0 && !producer_gate.held); lock.held=0;
     assert(audio_pre_rslt_stop()==1 && !dma_tx && idle.count==22 && !busy.count);
-    assert(!sg_init_tmp_str.codec_start_flag[0] && !producer_lock.held);
+    assert(!sg_init_tmp_str.codec_start_flag[0] && !producer_gate.held);
     ready=1; regs.iis_load_ctrl.val=0;
-    for(int i=0;i<12;++i) audio_pre_rslt_upload_by_iis(left,right,&audio);
+    for(int i=0;i<12;++i) produce(left,right,&audio,1);
     assert(!dma_tx && !sg_init_tmp_str.codec_start_flag[0]);
+    poll_start();
     regs.iis_load_ctrl.val=0;
-    audio_pre_rslt_upload_by_iis(left,right,&audio);
+    poll_start();
     assert(dma_tx && sg_init_tmp_str.codec_start_flag[0]);
+    /* Queued start work must not revive an old peer or canceled PCM. */
+    assert(audio_pre_rslt_stop()==1);
+    for(int i=0;i<12;++i) produce(left,right,&audio,0); /* direct task producer remains supported */
+    audio_pre_rslt_request_start(); assert(queued_start);
+    ready=0; assert(audio_pre_rslt_stop()==1); calls=hardware_calls;
+    deliver_start(); assert(!dma_tx && calls==hardware_calls && idle.count==22);
+    ready=1;
+    for(int i=0;i<12;++i) produce(left,right,&audio,1);
+    queue_full=1; audio_pre_rslt_request_start();
+    assert(!uplink_start_event_queued && !queued_start);
+    queue_full=0; inline_delivery=1;
+    regs.iis_load_ctrl.val=0; poll_start();
+    regs.iis_load_ctrl.val=0; poll_start();
+    assert(dma_tx && !uplink_start_event_queued && sg_init_tmp_str.codec_start_flag[0]);
+    inline_delivery=0;
+    /* Repeated real producer/task-owner reconnects keep all 22 buffers. */
+    for(int cycle=0;cycle<2000;++cycle) {
+        ready=0; assert(audio_pre_rslt_stop()==1 && idle.count==22 && !busy.count);
+        ready=1;
+        for(int i=0;i<12;++i) produce(left,right,&audio,1);
+        regs.iis_load_ctrl.val=0; poll_start();
+        regs.iis_load_ctrl.val=0; poll_start();
+        assert(dma_tx && sg_init_tmp_str.codec_start_flag[0]);
+        in_isr=1;
+        for(int i=0;i<5;++i) cm_output_interrupt_handler(0,&w);
+        in_isr=0;
+    }
+    assert(audio_pre_rslt_stop()==1 && idle.count==22);
     assert(dma_rx==1 && global_dma==1);
-    puts("uplink: actual producer recovers from full prefill, locks never wait, PCM gated during loss, restart passed");
+    puts("uplink: real ISR/task producers, system-owned start, full prefill retry, queue pressure/preemption, stale work, 2000 reconnects passed");
 }
 '''
     return source
@@ -329,6 +434,7 @@ def uart_fixture():
 static TickType_t now;
 static int iterations, max_iterations, ping_count, pong_count, stop_count, start_count;
 static int audio_result=1, audio_stop_count, audio_start_count, last_ack, firmware_count;
+static int start_poll_count;
 static int queue_full, inline_delivery, queued;
 static jmp_buf loop_done;
 static TickType_t xTaskGetTickCount(void) { return now; }
@@ -367,6 +473,7 @@ static int start_downlink(void) { ++start_count; return 1; }
 static int finish_downlink(uint32_t count) { return 1; }
 static int audio_pre_rslt_stop(void) { ++audio_stop_count; return audio_result; }
 static void audio_pre_rslt_start(void) { ++audio_start_count; }
+static void audio_pre_rslt_request_start(void) { assert(!in_isr); ++start_poll_count; }
 static void set_state_exit_wakeup(void) {}
 static void vol_set_from_esp_percent(unsigned percent) {}
 static int persist_ota_mcu_status(int status) { return 1; }
@@ -387,8 +494,10 @@ static int send_msg_to_sys_task(sys_msg_t *event, void *w) {
         source += function(UART, name)
     source += r'''
 static void heartbeat(unsigned polls) {
+    int previous_polls=start_poll_count;
     iterations=0; max_iterations=polls;
     if(!setjmp(loop_done)) heartbeat_task(NULL);
+    assert(start_poll_count==previous_polls+(int)polls);
 }
 static void deliver(void) { assert(queued); queued=0; ai_uart_i2s_handle_timeout(); }
 int main(void) {

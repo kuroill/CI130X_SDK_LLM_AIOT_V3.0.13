@@ -31,6 +31,9 @@ void audio_pre_rslt_write_data(int16_t* rslt,int16_t* origin, uint32_t wrapfft_a
 /* 1 = canceled, 0 = retry later, -1 = ownership/configuration error. */
 int audio_pre_rslt_stop(void);
 void audio_pre_rslt_start(void);
+/* Heartbeat posts bounded work; only the system-message task handles it. */
+void audio_pre_rslt_request_start(void);
+void audio_pre_rslt_handle_start(void);
 /**
  * @}
  */

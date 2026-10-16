@@ -695,7 +695,11 @@ static int cm_is_external_slave_output(int codec_index)
 
 int cm_try_start_slave_output(int codec_index)
 {
-    if(!cm_is_external_slave_output(codec_index) || check_curr_trap())
+    if(check_curr_trap())
+    {
+        return -2;
+    }
+    if(!cm_is_external_slave_output(codec_index))
     {
         return -1;
     }

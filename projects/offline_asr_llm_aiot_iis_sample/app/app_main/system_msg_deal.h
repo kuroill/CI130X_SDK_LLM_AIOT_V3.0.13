@@ -142,6 +142,7 @@ typedef enum
     SYS_MSG_TYPE_FACTORY_TEST_PLAY,    //生产测试播放
     SYS_MSG_TYPE_AI_UART,
     SYS_MSG_TYPE_AI_UART_TIMEOUT,
+    SYS_MSG_TYPE_AI_I2S_UPLINK_START,
 }sys_msg_type_t;
 
 

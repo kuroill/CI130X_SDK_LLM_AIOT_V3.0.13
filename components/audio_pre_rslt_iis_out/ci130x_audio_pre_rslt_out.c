@@ -21,6 +21,8 @@
 #include "user_config.h"
 #include "ci_audio_wrapfft.h"
 #include "ai_uart_i2s_protocol.h"
+#include "ci130x_core_misc.h"
+#include "system_msg_deal.h"
 #if AUTO_GET_AEC_GAIN
 #include "alg_preprocess.h"
 #include "cias_network_msg_protocol.h"
@@ -55,9 +57,38 @@ static void uart_dma_read_irq_callback(void)
 
 static audio_pre_init_tmp_t sg_init_tmp_str;
 #if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
-/* The producer and link-loss owner must never borrow/reclaim PCM concurrently.
- * Both paths try once; the ASR task and UART heartbeat never wait on this lock. */
-static SemaphoreHandle_t uplink_mutex;
+/* The mailbox producer may run in an ISR. A binary gate serializes its buffer
+ * borrow with task-owned start/cancel without using an RTOS mutex in the ISR. */
+static SemaphoreHandle_t uplink_gate;
+/* One heartbeat task publishes start work; the system task consumes it. */
+static volatile uint8_t uplink_start_event_queued;
+
+static BaseType_t uplink_try_take(void)
+{
+    if(!uplink_gate)
+    {
+        return pdFALSE;
+    }
+    if(check_curr_trap())
+    {
+        return xSemaphoreTakeFromISR(uplink_gate, NULL);
+    }
+    return xSemaphoreTake(uplink_gate, 0);
+}
+
+static void uplink_give(void)
+{
+    if(check_curr_trap())
+    {
+        BaseType_t higher_priority_task_woken = pdFALSE;
+        xSemaphoreGiveFromISR(uplink_gate, &higher_priority_task_woken);
+        portYIELD_FROM_ISR(higher_priority_task_woken);
+    }
+    else
+    {
+        xSemaphoreGive(uplink_gate);
+    }
+}
 #endif
 
 #define PI (3.1416926f)
@@ -424,8 +455,9 @@ void audio_pre_rslt_out_play_card_init(void)
     sg_init_tmp_str.send_data_cnt = 0;
     memset(sg_init_tmp_str.codec_start_flag,false,MAX_CODEC_NUM);
 #if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
-    uplink_mutex = xSemaphoreCreateMutex();
-    CI_ASSERT(uplink_mutex, "uplink lifecycle mutex\r\n");
+    uplink_gate = xSemaphoreCreateBinary();
+    CI_ASSERT(uplink_gate, "uplink lifecycle gate\r\n");
+    /* Keep the gate empty until codec queues and hardware are initialized. */
 #endif
 #if DEBUG_AUDIO_UART_UPLOAD_EN
     uart_send_voice_init();
@@ -441,6 +473,9 @@ void audio_pre_rslt_out_play_card_init(void)
     audio_pre_rslt_out_codec_init();
 #endif
 
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+    xSemaphoreGive(uplink_gate);
+#endif
 #if AI_UART_CONTROL_EN
     ai_uart_i2s_on_audio_ready();
 #endif
@@ -453,29 +488,14 @@ void codec_output_ctl(int codec_index)
         mprintf("codec_index err\r\n");
         return;
     }
-    int cnt = cm_get_codec_busy_buffer_number(codec_index,CODEC_OUTPUT);
 #if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
     if(PLAY_PRE_AUDIO_CODEC_ID == codec_index)
     {
-        /* The NN/AEC producer is slightly slower than the fixed 16 kHz I2S clock.
-         * Prefill once, then keep TX running so short queue underruns become short
-         * zero gaps instead of repeated stop/rebuffer gaps seen by ESP VAD. */
-        if(!sg_init_tmp_str.codec_start_flag[codec_index] && (cnt > 10))
-        {
-            int result = cm_try_start_slave_output(codec_index);
-            if(result == 0)
-            {
-                sg_init_tmp_str.codec_start_flag[codec_index] = true;
-                mprintf("[AI_I2S] continuous uplink started prefillFrames=%d\r\n", cnt);
-            }
-            else if(result < 0)
-            {
-                mprintf("[AI_I2S] start failed codec=%d reason=invalid_slave_output\r\n", codec_index);
-            }
-        }
+        /* Only the system-message owner may change external slave TX state. */
         return;
     }
 #endif
+    int cnt = cm_get_codec_busy_buffer_number(codec_index,CODEC_OUTPUT);
     if (!sg_init_tmp_str.codec_start_flag[codec_index])
     {
         /*busy buffer 大于10帧再开启codec，否则会出现数据量不够的情况*/
@@ -495,6 +515,67 @@ void codec_output_ctl(int codec_index)
             sg_init_tmp_str.codec_start_flag[codec_index] = false;
         }
     }
+}
+
+/* Called by the existing heartbeat task, never by the mailbox producer.
+ * Retry hardware progress even if every prefill buffer is already full. */
+void audio_pre_rslt_request_start(void)
+{
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+    CI_ASSERT(!check_curr_trap(), "uplink start request requires task context\r\n");
+    if(uplink_start_event_queued || !ai_uart_i2s_peer_ready() ||
+       (pdTRUE != uplink_try_take()))
+    {
+        return;
+    }
+    int needed = !sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] &&
+        (cm_get_codec_busy_buffer_number(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT) > 10);
+    if(needed)
+    {
+        /* Set before enqueue: the system owner can preempt the sender. */
+        uplink_start_event_queued = 1;
+    }
+    uplink_give();
+    if(needed)
+    {
+        sys_msg_t event;
+        memset(&event, 0, sizeof(event));
+        event.msg_type = SYS_MSG_TYPE_AI_I2S_UPLINK_START;
+        if(pdPASS != send_msg_to_sys_task(&event, NULL))
+        {
+            uplink_start_event_queued = 0;
+        }
+    }
+#endif
+}
+
+void audio_pre_rslt_handle_start(void)
+{
+#if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
+    CI_ASSERT(!check_curr_trap(), "uplink start owner requires task context\r\n");
+    if(ai_uart_i2s_peer_ready() && (pdTRUE == uplink_try_take()))
+    {
+        int cnt = cm_get_codec_busy_buffer_number(PLAY_PRE_AUDIO_CODEC_ID, CODEC_OUTPUT);
+        if(ai_uart_i2s_peer_ready() &&
+           !sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] && (cnt > 10))
+        {
+            int result = cm_try_start_slave_output(PLAY_PRE_AUDIO_CODEC_ID);
+            if(result == 0)
+            {
+                sg_init_tmp_str.codec_start_flag[PLAY_PRE_AUDIO_CODEC_ID] = true;
+                mprintf("[AI_I2S] continuous uplink started prefillFrames=%d owner=system context=task\r\n", cnt);
+            }
+            else if(result < 0)
+            {
+                mprintf("[AI_I2S] start failed codec=%d reason=%s owner=system\r\n",
+                    PLAY_PRE_AUDIO_CODEC_ID,
+                    (result == -2) ? "interrupt_context" : "invalid_slave_output");
+            }
+        }
+        uplink_give();
+    }
+    uplink_start_event_queued = 0;
+#endif
 }
 
 extern CiasAiotRunParamTypedef gCiasAiotRunParam;
@@ -653,18 +734,15 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
     int num = block_size / sizeof(int16_t) / 2;
     report_aec_path_levels(p_wrapfft_audio, (uint32_t)num);
 #if AI_UART_CONTROL_EN
-    if(!ai_uart_i2s_peer_ready() || !uplink_mutex ||
-       (pdTRUE != xSemaphoreTake(uplink_mutex, 0)))
+    if(!ai_uart_i2s_peer_ready() || (pdTRUE != uplink_try_take()))
     {
         return;
     }
     if(!ai_uart_i2s_peer_ready())
     {
-        xSemaphoreGive(uplink_mutex);
+        uplink_give();
         return;
     }
-    /* Retry a pending hardware start even when all prefill buffers are full. */
-    codec_output_ctl(PLAY_PRE_AUDIO_CODEC_ID);
 #endif
 #if IIS_UPLOAD_IS_WAKEUP
     if ((gCiasAiotRunParam.is_wake_up_flag || gCiasAiotRunParam.is_always_iis_flag))  
@@ -674,7 +752,7 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
         if (0 == write_pcm_addr)
         {
 #if AI_UART_CONTROL_EN
-            xSemaphoreGive(uplink_mutex);
+            uplink_give();
 #endif
             return;
         }
@@ -702,11 +780,13 @@ void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audi
         }
         cm_write_codec(PLAY_PRE_AUDIO_CODEC_ID, (void *)write_pcm_addr, 0);
     }
+#if !AI_UART_CONTROL_EN
     codec_output_ctl(PLAY_PRE_AUDIO_CODEC_ID);
+#endif
     sg_init_tmp_str.send_data_cnt++;
     sg_init_tmp_str.write_data_cnt++;
 #if AI_UART_CONTROL_EN
-    xSemaphoreGive(uplink_mutex);
+    uplink_give();
 #endif
 }
 #elif USE_AUDIO_UPLOAD_BY_HPOUT
@@ -899,7 +979,7 @@ void audio_pre_rslt_upload_by_uart(int16_t *left, int16_t *right, ci_wrapfft_aud
  *
  * @param rslt 处理结果的起始指针
  * @param origin 原始数据的起始指针
- *  此函数不可用于中断
+ *  IIS AI 上行支持 mailbox 中断回调；只同步复制 PCM，不在回调内启停硬件。
  */
 void audio_pre_rslt_write_data(int16_t *left, int16_t *right, uint32_t wrapfft_audio_addr)
 {
@@ -939,11 +1019,11 @@ int audio_pre_rslt_stop(void)
 {
 #if AI_UART_CONTROL_EN && USE_AUDIO_UPLOAD_BY_IIS
     /* Initialization has not exposed a producer yet. */
-    if(!uplink_mutex)
+    if(!uplink_gate)
     {
         return 1;
     }
-    if(pdTRUE != xSemaphoreTake(uplink_mutex, 0))
+    if(pdTRUE != uplink_try_take())
     {
         return 0;
     }
@@ -954,7 +1034,7 @@ int audio_pre_rslt_stop(void)
         sg_init_tmp_str.send_data_cnt = 0;
         mprintf("[AI_I2S] uplink canceled dma=off buffers=reclaimed iis=deferred\r\n");
     }
-    xSemaphoreGive(uplink_mutex);
+    uplink_give();
     return (result == 0) ? 1 : ((result > 0) ? 0 : -1);
 #else
 #if USE_IIS1_OUT_PRE_RSLT_AUDIO

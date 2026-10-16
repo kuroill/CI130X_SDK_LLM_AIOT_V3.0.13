@@ -16,6 +16,7 @@
 #include "cias_voice_upload.h"
 #include "cias_aiot_protocol.h"
 #include "ai_uart_i2s_protocol.h"
+#include "ci130x_audio_pre_rslt_out.h"
 // #include "all_cmd_statement.h"
 
 ///tag-insert-code-pos-1
@@ -579,6 +580,9 @@ uint32_t deal_userdef_msg(sys_msg_t *msg)
         break;
     case SYS_MSG_TYPE_AI_UART_TIMEOUT:
         ai_uart_i2s_handle_timeout();
+        break;
+    case SYS_MSG_TYPE_AI_I2S_UPLINK_START:
+        audio_pre_rslt_handle_start();
         break;
     /* 按键消息 */
     case SYS_MSG_TYPE_KEY:
