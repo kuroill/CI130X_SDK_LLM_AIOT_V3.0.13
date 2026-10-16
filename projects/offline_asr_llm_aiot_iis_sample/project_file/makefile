@@ -1,6 +1,27 @@
 
 SDK_PATH ?= ../../..
 
+# Keep BNPU configuration/linker output complete before parsing the MCU graph.
+# Recursive make preserves the jobserver and explicit IDE command-line flags.
+.DEFAULT_GOAL := all
+ifneq ($(LENWELL_MCU_BUILD_STAGE),1)
+SDK_ROOT := $(abspath $(SDK_PATH))
+ifneq ($(filter clean,$(MAKECMDGOALS)),)
+ifneq ($(filter-out clean,$(MAKECMDGOALS)),)
+$(error Run clean separately from build targets)
+endif
+endif
+.PHONY: $(sort all $(MAKECMDGOALS)) lenwell-build
+$(sort all $(MAKECMDGOALS)): lenwell-build
+lenwell-build:
+ifeq ($(MAKECMDGOALS),clean)
+	+$(MAKE) -f makefile LENWELL_MCU_BUILD_STAGE=1 SDK_PATH="$(SDK_PATH)" clean
+else
+	+$(MAKE) -C "$(SDK_ROOT)/projects/bnpu_core_alg_pro/project_file" PROJECT_NAME=bnpu_core_alg_pro SDK_PATH=../../.. all
+	+$(MAKE) -f makefile LENWELL_MCU_BUILD_STAGE=1 SDK_PATH="$(SDK_PATH)" $(if $(MAKECMDGOALS),$(MAKECMDGOALS),all)
+endif
+else
+
 include $(SDK_PATH)/system/user_alg_config.mk
 include $(SDK_PATH)/utils/common_head.mk
 
@@ -108,7 +129,10 @@ endif
 
 ALG_PRO_LINK_LDS := ../lds/ci130x_asr_alg_mcu.lds
 LIB_BNPU_CORE_ALG_PRO := ci130x_asr_alg_bnpu.a
-SECONDARY_FLASH := ../firmware/user_code/[0]code.bin 
+MCU_FLASH := ../firmware/user_code/[0]code.bin
+BNPU_FLASH := $(SDK_PATH)/$(LIBS_PATH)/$(LIB_BNPU_CORE_ALG_PRO)
+SECONDARY_FLASH := ../firmware/user_code/user_code.bin
+COMMON_LINK_LDS := $(SDK_PATH)/utils/common.lds
 SECONDARY_LIST := $(BUILD_DIR)/$(PROJECT_NAME).lst
 LTO_OPTION = -flto
 
@@ -182,26 +206,68 @@ endif
 
 endif
 
-SDK_ALG_PRO_SRAM_HOST_END_ADDR = $(shell grep 'SDK_ALG_PRO_SRAM_HOST_END_ADDR' ../../../utils/common.lds | grep -o '0x[0-9a-fA-F]*')
-$(ALG_PRO_LINK_LDS):../lds/ci130x_asr_alg_mcu_temp.lds
+
+# Compare effective flags on every invocation without changing the stamp on a
+# no-op build. Do not attach this forced prerequisite to an included makefile.
+BUILD_CONFIG := $(BUILD_DIR)/build-config.txt
+BUILD_CONFIG_INPUTS := makefile source_file.prj $(SDK_PATH)/system/user_alg_config.mk \
+	$(SDK_PATH)/utils/common_head.mk $(SDK_PATH)/utils/common_tail_mcu.mk \
+	$(SDK_PATH)/utils/generate_makefile.lua
+shell_quote = '$(subst ','"'"',$(1))'
+.PHONY: force-build-config
+.DELETE_ON_ERROR:
+$(BUILD_CONFIG): force-build-config
+	@mkdir -p "$(BUILD_DIR)"
+	@printf '%s\n' $(call shell_quote,PROJECT_NAME=$(PROJECT_NAME)) \
+		$(call shell_quote,SDK_PATH=$(SDK_PATH)) \
+		$(call shell_quote,CC=$(CC_PREFIX)$(CC)) $(call shell_quote,AS=$(CC_PREFIX)$(AS)) \
+		$(call shell_quote,LD=$(CC_PREFIX)$(LD)) $(call shell_quote,OC=$(CC_PREFIX)$(OC)) \
+		$(call shell_quote,C_FLAGS=$(C_FLAGS)) $(call shell_quote,S_FLAGS=$(S_FLAGS)) \
+		$(call shell_quote,LD_FLAGS=$(LD_FLAGS)) $(call shell_quote,LIBS=$(LIBS)) \
+		$(call shell_quote,LIB_FILES=$(LIB_FILES)) $(call shell_quote,USER_OBJS=$(USER_OBJS)) \
+		$(call shell_quote,SDK_ALG_PRO_SRAM_HOST_END_ADDR=$(SDK_ALG_PRO_SRAM_HOST_END_ADDR)) > "$@.tmp"
+	@if $(CMDBOX) cmp -s "$@" "$@.tmp"; then rm -f "$@.tmp"; else mv -f "$@.tmp" "$@"; fi
+
+$(OBJS): $(BUILD_CONFIG) $(BUILD_CONFIG_INPUTS)
+build/source_file.mk: $(SDK_PATH)/utils/generate_makefile.lua
+
+SDK_ALG_PRO_SRAM_HOST_END_ADDR = $(shell grep 'SDK_ALG_PRO_SRAM_HOST_END_ADDR' $(COMMON_LINK_LDS) | grep -o '0x[0-9a-fA-F]*')
+$(ALG_PRO_LINK_LDS): ../lds/ci130x_asr_alg_mcu_temp.lds $(COMMON_LINK_LDS) $(BUILD_CONFIG) $(BUILD_CONFIG_INPUTS)
 	sed 's/@@SDK_ALG_PRO_SRAM_HOST_END_ADDR@@/$(SDK_ALG_PRO_SRAM_HOST_END_ADDR)/g' $< >$@
 
-$(BUILD_DIR)/$(PROJECT_NAME).elf: $(OBJS) $(USER_OBJS) build/source_file.mk $(LIB_FILES) $(ALG_PRO_LINK_LDS)  makefile 
+$(BUILD_DIR)/$(PROJECT_NAME).elf: $(OBJS) $(USER_OBJS) build/source_file.mk $(LIB_FILES) $(ALG_PRO_LINK_LDS) $(BUILD_CONFIG) $(BUILD_CONFIG_INPUTS)
 	@echo 'Building target: $@'
 	@echo 'Invoking: GNU RISC-V Cross C++ Linker'
 	$(CC_PREFIX)$(LD) $(LD_FLAGS)  -o "$(BUILD_DIR)/$(PROJECT_NAME).elf" $(OBJS) $(USER_OBJS) $(LIBS)
 	@echo 'Finished building target: $@'
 	@echo ' '
 
-$(SECONDARY_FLASH): $(BUILD_DIR)/$(PROJECT_NAME).elf
-	@echo 'Inving: GNU RISC-V Cross Create Flash Image'
-	@mkdir -p ../firmware/user_code && $(CC_PREFIX)$(OC) -O binary "$(BUILD_DIR)/$(PROJECT_NAME).elf"  $(SECONDARY_FLASH)
-	@cp $(SDK_PATH)/$(LIBS_PATH)/$(LIB_BNPU_CORE_ALG_PRO) ../firmware/user_code/[1]code.bin
-	@$(SDK_PATH)/tools/ci-tool-kit merge user-file -i ../firmware/user_code > /dev/null
-	@rm ../firmware/user_code/[1]code.bin
+$(MCU_FLASH): $(BUILD_DIR)/$(PROJECT_NAME).elf
+	@echo 'Invoking: GNU RISC-V Cross Create MCU Flash Image'
+	@set -e; mkdir -p ../firmware/user_code; \
+		trap 'rm -f "$@.tmp"' 0; \
+		$(CC_PREFIX)$(OC) -O binary "$<" "$@.tmp"; \
+		mv -f "$@.tmp" "$@"
+
+# The merged image is a separate output: changing only BNPU must re-merge it.
+# Retain the last successful package if objcopy/merge fails. The staging
+# directory basename is significant: ci-tool-kit emits user_code.bin there.
+$(SECONDARY_FLASH): $(MCU_FLASH) $(BNPU_FLASH)
+	@echo 'Merging current MCU and BNPU images: $@'
+	@set -e; merge_dir="$(BUILD_DIR)/merge/user_code"; \
+		mkdir -p "$$merge_dir"; \
+		trap 'rm -f "$$merge_dir/[0]code.bin" "$$merge_dir/[1]code.bin" "$$merge_dir/user_code.bin"' 0; \
+		rm -f "$$merge_dir/user_code.bin"; \
+		cp "$(MCU_FLASH)" "$$merge_dir/[0]code.bin"; \
+		cp "$(BNPU_FLASH)" "$$merge_dir/[1]code.bin"; \
+		"$(SDK_PATH)/tools/ci-tool-kit" merge user-file -i "$$merge_dir" > /dev/null; \
+		test -s "$$merge_dir/user_code.bin"; \
+		mv -f "$$merge_dir/user_code.bin" "$@"
 	@echo 'Finished building: $@'
-	@echo ' '
-	
+
+.PHONY: user_code
+user_code: $(SECONDARY_FLASH)
+
 $(BUILD_DIR)/$(PROJECT_NAME).lst: $(BUILD_DIR)/$(PROJECT_NAME).elf
 	@echo 'Invoking: GNU RISC-V Cross Create Listing'
 	$(CC_PREFIX)$(OD) --demangle --disassemble --reloc --wide "$(BUILD_DIR)/$(PROJECT_NAME).elf" > "$(BUILD_DIR)/$(PROJECT_NAME).lst"
@@ -216,3 +282,4 @@ secondary-outputs: $(ALG_PRO_LINK_LDS) $(SECONDARY_FLASH) $(SECONDARY_LIST)
 
 include $(SDK_PATH)/utils/common_tail_mcu.mk
 
+endif # LENWELL_MCU_BUILD_STAGE

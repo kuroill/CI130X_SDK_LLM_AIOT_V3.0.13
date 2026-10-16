@@ -29,8 +29,45 @@ CI130X SDK 适用于CI130X系列芯片
 ```powershell
 $env:PATH="E:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\tools\build-tools\bin;E:\Project\toolchain-gd32v-v9.2.0-win\bin;$env:PATH"
 cd E:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\projects\offline_asr_llm_aiot_iis_sample\project_file
-make clean; make -r -j8
+make clean
+if ($LASTEXITCODE -ne 0) { throw "CI clean failed" }
+make -r -j8
+if ($LASTEXITCODE -ne 0) { throw "CI build failed; do not use the previous package" }
 ```
+
+应用构建会先构建 `projects/bnpu_core_alg_pro`，成功后才生成 MCU 链接脚本、
+构建应用并合并两核镜像。AEC 的 `ci_basic_alg.c`、`alg_preprocess.c` 属于 BNPU
+算法核，仅重编 MCU 不能让它们生效。算法核失败时整个构建失败；必须等待完整构建
+成功，不能把失败后仍留存的旧 `user_code.bin` 当作本次产物。
+
+旧流程直接拷贝 `libs/ci130x_asr_alg_bnpu.a`，该文件虽以后缀 `.a` 命名，实际是
+算法核二进制。仓库原有版本没有包含源码中的 MIC/REF 独立增益修正。首次使用新
+构建流程时必须重新生成两核镜像；不要直接使用此前打包的固件。
+
+完成构建后，可在同一个 PowerShell 窗口核对算法核和最终合包均含修正后的日志标记：
+
+```powershell
+riscv-nuclei-elf-strings ../../../libs/ci130x_asr_alg_bnpu.a | Select-String -SimpleMatch '[AEC] fixed_gain'
+riscv-nuclei-elf-strings ../firmware/user_code/user_code.bin | Select-String -SimpleMatch '[AEC] fixed_gain'
+```
+
+两处均应匹配；该检查只证明相关代码进入产物，不证明 AEC 效果正常。现有
+`fixed_gain` 日志仅在关闭原本开启的 ALC 时输出；ALC 已关闭时没有这行，不能单凭
+运行日志缺行认定增益修正未执行。
+
+macOS 可运行构建依赖和 AEC 增益的主机回归，不生成可刷写固件：
+
+```sh
+python3 script/test_bnpu_build_dependency.py
+python3 script/test_aec_codec_gain.py
+```
+
+Windows 正式构建并更新设备后，保持原音量，只说一次“听得见吗”后安静等待，
+服务端应仅处理这一次用户问题，不应把设备的回答识别为新的用户轮次。观察
+`[AEC_PATH]` 的 `refPeak`、`refAbs` 和 `dstAbs`；若参考仍长期接近满幅或设备仍
+识别自己的播报，需要继续采集 MIC/REF/DST 定位，不能以 `work_state=1` 认定消回声
+成功。随后在播报中真人插话，应正常打断并识别完整问题；再验证连续对话和返回
+待唤醒。`FINISH ... pcm_timeout` / 非零计数不一致属于下行完整性错误，应单独记录。
 
 关闭捕捉
 #define ASR_MIDDLE_RESULT_OUT_EN       0  
