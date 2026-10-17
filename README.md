@@ -4,6 +4,9 @@
 
 CI130X SDK 适用于CI130X系列芯片
 
+官方文档：
+https://www.chipintelli.com/zh-cn/page/151.html
+
 ## SDK目录结构
 
 | 目录       | 描述             |
