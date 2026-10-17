@@ -36,6 +36,18 @@ volume`、`gainRatioPercent=50`（50 档时 `pcmGainPermille=100`），ESP 内�
 `firmware prompt playback started` 的同一比例。会话内重复唤醒的 ding 抑制规则保留；
 完整响度、安静播放、真人打断与下一轮恢复仍需实机验证。
 
+ESP 内置播报与 AI 回复反复爆音的现场原因尚未确认。诊断代码在现有下行 owner
+复制左槽 PCM 时采集峰值、非零样本 FNV-1a 摘要与左右槽差异，STOP/FINISH 后打印
+`[CI_PCM] stage=dac_queued`；不会调整样本、音量、时钟或播放所有权。用户更新两端
+后，只对无中断、无 TX 错误且 `finish complete` 的同次播放，与 ESP 的
+`stage=tx_submitted` 对照 `nonzeroSamples/nonzeroHash/peak`，两端应一致且
+`stereoMismatches=0`。不一致可定位数字链路差异；一致不能证明静音时长、DAC
+供数或扬声器音质正确。主机检查命令：
+
+```sh
+python3 script/test_downlink_pcm_trace.py
+```
+
 本 SDK 的官方预编译算法库由 Nuclei GCC 9.2.0 生成，必须使用同版本工具链。当前构建日志中的 `D:\Project\gcc\bin` 是 GCC 10.2.0，会在链接 LTO 算法库时报 `generated with GCC compiler older than 10.0`。确认 `D:\Project\gcc\bin` 已换成 GCC 9.2.0 后，在 PowerShell 中依次执行：
 
 ```powershell

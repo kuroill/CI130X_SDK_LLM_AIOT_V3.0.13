@@ -93,6 +93,13 @@ static volatile TickType_t last_firmware_info_tick;
 static uint8_t tx_seq;
 static uint32_t downlink_bytes;
 static uint32_t downlink_nonzero_samples;
+typedef struct
+{
+    uint32_t nonzero_hash;
+    uint32_t peak;
+    uint32_t stereo_mismatches;
+}ai_downlink_pcm_trace_t;
+static ai_downlink_pcm_trace_t downlink_pcm_trace;
 static volatile uint32_t dropped_commands;
 static uint8_t downlink_play_buffer[
     AUDIO_CAP_POINT_NUM_PER_FRM * sizeof(int16_t) * AI_DOWNLINK_PCM_BUFFER_COUNT];
@@ -211,6 +218,8 @@ static void stop_downlink(void)
     uint8_t was_active;
     uint8_t aec_tail_armed = 0;
     uint32_t stopped_bytes;
+    uint32_t stopped_nonzero_samples;
+    ai_downlink_pcm_trace_t stopped_trace;
 
     xSemaphoreTake(downlink_mutex, portMAX_DELAY);
     was_active = downlink_enabled || downlink_codec_started;
@@ -230,6 +239,8 @@ static void stop_downlink(void)
         downlink_codec_started = 0;
     }
     stopped_bytes = downlink_bytes;
+    stopped_nonzero_samples = downlink_nonzero_samples;
+    stopped_trace = downlink_pcm_trace;
     xSemaphoreGive(downlink_mutex);
 
     if(was_active)
@@ -238,6 +249,11 @@ static void stop_downlink(void)
             "[DOWNLINK] stopped bytes=%u rx=drain pa=keep-on aec_tail=%u\r\n",
             (unsigned int)stopped_bytes,
             (unsigned int)aec_tail_armed);
+        mprintf("[CI_PCM] stage=dac_queued nonzeroSamples=%lu nonzeroHash=%08lx peak=%lu stereoMismatches=%lu audibleVerified=false\r\n",
+            (unsigned long)stopped_nonzero_samples,
+            (unsigned long)stopped_trace.nonzero_hash,
+            (unsigned long)stopped_trace.peak,
+            (unsigned long)stopped_trace.stereo_mismatches);
     }
 }
 
@@ -297,6 +313,39 @@ static uint8_t finish_downlink(uint32_t expected_nonzero_samples)
     return 1;
 }
 
+/* Trace exactly the mono PCM passed to the DAC. The hash excludes zero-valued
+ * samples so ESP/CI can compare content despite leading/trailing bus silence.
+ * Caller holds downlink_mutex; no ISR, UART or extra playback owner is added. */
+static uint32_t copy_downlink_pcm_with_trace(const int16_t *input, int16_t *output,
+    uint32_t sample_count, ai_downlink_pcm_trace_t *trace)
+{
+    uint32_t nonzero_samples = 0;
+    for(uint32_t i = 0; i < sample_count; i++)
+    {
+        int16_t left = input[2U * i];
+        int16_t right = input[2U * i + 1U];
+        int32_t sample = left;
+        uint32_t magnitude = (uint32_t)(sample < 0 ? -sample : sample);
+        output[i] = left;
+        if(magnitude > trace->peak)
+        {
+            trace->peak = magnitude;
+        }
+        if(left != right)
+        {
+            trace->stereo_mismatches++;
+        }
+        if(left != 0)
+        {
+            uint16_t bits = (uint16_t)left;
+            trace->nonzero_hash = (trace->nonzero_hash ^ (bits & 0xffU)) * 0x01000193U;
+            trace->nonzero_hash = (trace->nonzero_hash ^ (bits >> 8)) * 0x01000193U;
+            nonzero_samples++;
+        }
+    }
+    return nonzero_samples;
+}
+
 static void downlink_task(void *arg)
 {
     (void)arg;
@@ -332,18 +381,10 @@ static void downlink_task(void *arg)
             if(output_addr)
             {
                 int16_t *output_pcm = (int16_t *)output_addr;
-                uint32_t nonzero_samples = 0;
-                /* ESP sends the mono TTS duplicated into both physical IIS slots.
-                 * Feed one slot to the mono DAC, matching the validated ci_audio
-                 * path and keeping the AEC reference tied to the actual playback. */
-                for(uint32_t i = 0; i < sample_count; i++)
-                {
-                    output_pcm[i] = input_pcm[2U * i];
-                    if(0 != output_pcm[i])
-                    {
-                        nonzero_samples++;
-                    }
-                }
+                /* ESP sends mono duplicated into both IIS slots. Preserve the
+                 * existing left-slot copy; diagnostics never alter its gain. */
+                uint32_t nonzero_samples = copy_downlink_pcm_with_trace(
+                    input_pcm, output_pcm, sample_count, &downlink_pcm_trace);
                 cm_write_codec(PLAY_CODEC_ID, (void *)output_addr, 0);
                 downlink_bytes += sample_count * sizeof(int16_t);
                 downlink_nonzero_samples += nonzero_samples;
@@ -399,6 +440,8 @@ static uint8_t start_downlink(void)
 
     downlink_bytes = 0;
     downlink_nonzero_samples = 0;
+    memset(&downlink_pcm_trace, 0, sizeof(downlink_pcm_trace));
+    downlink_pcm_trace.nonzero_hash = 0x811c9dc5U;
     downlink_codec_started = 1;
     /* Arm the V3 AEC before the DAC can emit the first queued sample. */
     ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING);
