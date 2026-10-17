@@ -9,6 +9,10 @@
 #include "ci130x_codec.h"
 #include "codec_manager.h"
 #include "user_config.h"
+#include "ci_conversation.generated.h"
+#if CI_AUDIO_DATA_BITS != 16 || CI_AUDIO_SLOT_BITS != 32 || CI_AUDIO_CHANNELS != 2 || CI_AUDIO_BCLK_PER_FRAME != 64
+#error "CI IIS0 requires the shared 16-bit stereo / 64FS audio contract"
+#endif
 #if SIMPLE_AUDIO_PLAYER_ENABLE
 #include "simple_audio_player.h"
 #else
@@ -590,7 +594,7 @@ cm_codec_hw_info_t audio_pre_tslt_out_info =
  */
 static cm_sound_info_t pre_rslt_out_sound_info = 
 {
-    .sample_rate = 16000,
+    .sample_rate = CI_AUDIO_SAMPLE_RATE_HZ,
     .channel_flag = 3,
     .sample_depth = IIS_DW_16BIT,
 };
