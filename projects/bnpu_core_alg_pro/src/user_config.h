@@ -2,26 +2,16 @@
 #ifndef __USER_CONFIG_H__
 #define __USER_CONFIG_H__
 
+/* Project overrides must be visible before the SDK supplies defaults. */
+#define USE_PWK                             1
+#define CONFIG_CI_LOG_UART                  0
+
 #include "sdk_default_config.h"
 
 #define NO_RC_CLOCK_CONFIG
 #define VAD_TIME_OUT_FRAME                 760                 //vad超时帧数        
 
 #define CONFIG_SYSTEMVIEW_EN               0                   //不使能systemview
-
-#if USE_V7
-#define CONFIG_CI_LOG_UART                  HAL_UART1_BASE
-#endif
-
-#if USE_V5
-#define CONFIG_CI_LOG_UART                  HAL_UART1_BASE
-#endif
-#if SDK_RELEASE_EN
-#define CONFIG_CI_LOG_UART                  0//HAL_UART0_BASE    
-#else
-#define CONFIG_CI_LOG_UART                  0 
-#endif
-#define USE_PWK                             1
 
 #define REF_IN_FROM_INNER_CODEC             0//双麦算法时，使用模拟右麦作参考信号
 

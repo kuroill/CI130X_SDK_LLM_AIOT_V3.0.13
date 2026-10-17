@@ -574,9 +574,12 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
         }
         vol_set_from_esp_percent(requested_percent);
         send_ack(cmd->seq, AI_UART_ACK_OK);
-        mprintf("[AUDIO] runtime volume applied requestedPercent=%u promptRatioPercent=60 promptPcmGainPermille=%u persisted=false\r\n",
+        mprintf("[AUDIO] runtime volume applied requestedPercent=%u otherPromptRatioPercent=%u otherPromptPcmGainPermille=%u wakeDingRatioPercent=%u wakeDingPcmGainPermille=%u persisted=false\r\n",
             (unsigned int)requested_percent,
-            ((unsigned int)requested_percent * 12U) / 5U);
+            (unsigned int)SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT,
+            ((unsigned int)requested_percent * SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT) / 25U,
+            (unsigned int)WAKEUP_DING_GAIN_RATIO_PERCENT,
+            ((unsigned int)requested_percent * WAKEUP_DING_GAIN_RATIO_PERCENT) / 25U);
         break;
     }
     case CI_CONVERSATION_COMMAND_SET_STATE:

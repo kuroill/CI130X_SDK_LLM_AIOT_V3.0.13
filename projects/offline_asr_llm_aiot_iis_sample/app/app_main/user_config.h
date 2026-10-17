@@ -254,6 +254,7 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
 #define VOLUME_OUTPUT_MAX_PERCENT       100 //硬件DAC固定满量程，实际用户音量由ESP PCM和本地提示音PCM控制。
 #define PLAYBACK_DAC_DIGITAL_GAIN_DB    10  //CI1306 DAC数字增益范围为-117..+10dB。
 #define WAKEUP_DING_VOICE_ID            1000
+#define WAKEUP_DING_GAIN_RATIO_PERCENT   50U //相对当前对话 PCM 增益，只影响唤醒 ding。
 
 #if AUDIO_PLAYER_ENABLE
 #if NET_AUDIO_PLAY_BY_OPUS

@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include "ci130x_system.h"
 #define PCM_FRAME_SIZE          (512)
+#define SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT 60U
 typedef enum
 {
     SAP_DATA_SRC_FLASH,         /*!< 从FLASH读取源数据 */
@@ -78,9 +79,10 @@ int sap_init(void);
  * @brief 启动播放，用于播放本地音频文件（从FLASH读取数据）。
  * @param data_addr uint32_t 用于指定音频数据在FLASH中的地址。
  * @param play_end_callback 播放结束的回调函数指针,因为此接口为异步接口,需要调用模块提供一个接口用于通知播放结束事件。
+ * @param gain_ratio_percent 此次播放相对 ESP 对话 PCM 增益的比例，范围 1..100。
  * @return int 1: 成功; not 1: 失败.
 t */
-int sap_play(uint32_t data_addr, void* play_end_callback);
+int sap_play(uint32_t data_addr, void* play_end_callback, uint8_t gain_ratio_percent);
 
 /**
  * @brief 启动播放, 用于播放其他通信模块提供的流式音频数据.

@@ -27,10 +27,22 @@ https://www.chipintelli.com/zh-cn/page/151.html
 
 ## Windows PowerShell 构建
 
+CI 本地唤醒 ding（`voice_id=1000`）的 PCM 增益调整为当前 ESP 对话增益的 50%，
+其余 CI 本地播报保持 60%。每段音频的比例随播放请求传入播放器 task，支持组合
+播报与排队抢占，不改全局用户音量或 DAC/MIC/REF 增益。50 档时对话幅度为 20%，
+唤醒音为 10%；ESP 内置播报的 50% 比例由 ESP 固件另行实现，两端都需用户更新。
+实机先在 1、50、100 档分别唤醒再听正常回复；CI 应出现 `[AUDIO] local playback
+volume`、`gainRatioPercent=50`（50 档时 `pcmGainPermille=100`），ESP 内置播报看
+`firmware prompt playback started` 的同一比例。会话内重复唤醒的 ding 抑制规则保留；
+完整响度、安静播放、真人打断与下一轮恢复仍需实机验证。
+
 本 SDK 的官方预编译算法库由 Nuclei GCC 9.2.0 生成，必须使用同版本工具链。当前构建日志中的 `D:\Project\gcc\bin` 是 GCC 10.2.0，会在链接 LTO 算法库时报 `generated with GCC compiler older than 10.0`。确认 `D:\Project\gcc\bin` 已换成 GCC 9.2.0 后，在 PowerShell 中依次执行：
 
 ```powershell
 $env:PATH="E:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\tools\build-tools\bin;E:\Project\toolchain-gd32v-v9.2.0-win\bin;$env:PATH"
+cd E:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\projects\bnpu_core_alg_pro\project_file
+make clean
+if ($LASTEXITCODE -ne 0) { throw "CI BNPU clean failed" }
 cd E:\Project\CI130X_SDK_LLM_AIOT_V3.0.13\projects\offline_asr_llm_aiot_iis_sample\project_file
 make clean
 if ($LASTEXITCODE -ne 0) { throw "CI clean failed" }
@@ -42,6 +54,13 @@ if ($LASTEXITCODE -ne 0) { throw "CI build failed; do not use the previous packa
 构建应用并合并两核镜像。AEC 的 `ci_basic_alg.c`、`alg_preprocess.c` 属于 BNPU
 算法核，仅重编 MCU 不能让它们生效。算法核失败时整个构建失败；必须等待完整构建
 成功，不能把失败后仍留存的旧 `user_code.bin` 当作本次产物。
+
+共享 UART/I2S 生成头文件位于 `components/ci_common/ci_conversation.generated.h`，
+MCU 和 BNPU 都通过现有 `source_file.prj` 搜索此目录。该文件由 `protocols` 生成并
+随 SDK 同步，Windows 构建无需另行手写常量或引用 MCU 应用目录；从旧版本更新时
+须同步新增头文件，并移除旧 `app/app_main/ci_conversation.generated.h`。BNPU 的
+PWK 与日志覆盖值放在 SDK 默认配置之前，避免头文件包含顺序引起宏重定义，原值
+`USE_PWK=1`、`CONFIG_CI_LOG_UART=0` 保持不变。
 
 旧流程直接拷贝 `libs/ci130x_asr_alg_bnpu.a`，该文件虽以后缀 `.a` 命名，实际是
 算法核二进制。仓库原有版本没有包含源码中的 MIC/REF 独立增益修正。首次使用新
@@ -63,6 +82,7 @@ macOS 可运行构建依赖和 AEC 增益的主机回归，不生成可刷写固
 ```sh
 python3 script/test_bnpu_build_dependency.py
 python3 script/test_aec_codec_gain.py
+python3 script/test_ci_build_headers.py
 ```
 
 Windows 正式构建并更新设备后，保持原音量，只说一次“听得见吗”后安静等待，

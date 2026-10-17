@@ -53,6 +53,7 @@ typedef struct
     uint32_t request_block_size;
     uint32_t fetcher_buffer_size;
     sap_src_type_t src_type;
+    uint8_t gain_ratio_percent;
     SAP_PLAY_END_CALLBACK play_end_callback;
     SAP_PLAY_DATA_REQUEST_CALLBACK data_request_callback;
     char *fmt;
@@ -62,6 +63,7 @@ typedef struct
 {
     QueueHandle_t msg_queue;
     sap_status_t state;
+    uint8_t gain_ratio_percent;
     // uint32_t data_addr;
     SAP_PLAY_END_CALLBACK play_end_callback;
     void *decoder_handle;
@@ -102,8 +104,8 @@ static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken);
 static int32_t g_audio_play_gain = VOLUME_OUTPUT_MAX_PERCENT;
 static volatile uint16_t g_audio_play_pcm_gain_percent = 50U;
 
-#define ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR 3
-#define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 1250
+/* Dialogue PCM amplitude is user_percent / 250; the request owns its ratio. */
+#define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 25000
 
 #if (PLAYBACK_DAC_DIGITAL_GAIN_DB < -117) || (PLAYBACK_DAC_DIGITAL_GAIN_DB > 10)
 #error "PLAYBACK_DAC_DIGITAL_GAIN_DB must be in the CI1306 DAC range [-117, 10] dB"
@@ -126,8 +128,12 @@ int sap_init(void)
  * @param play_end_callback A pointer to a function that will be called when play to end.
  * @return int 1: successed; not 1: failed.
 t */
-int sap_play(uint32_t data_addr, void *play_end_callback)
+int sap_play(uint32_t data_addr, void *play_end_callback, uint8_t gain_ratio_percent)
 {
+    if((gain_ratio_percent < 1U) || (gain_ratio_percent > 100U))
+    {
+        return 0;
+    }
     gCiasAiotRunParam.request_play_data_flag = false;
     #if NET_AUDIO_PLAY_BY_PCM || NET_AUDIO_PLAY_BY_G722 || NET_AUDIO_PLAY_BY_MP3
     gCiasAiotRunParam.cloud_play_state = CLOUD_PLAY_END;
@@ -139,10 +145,12 @@ int sap_play(uint32_t data_addr, void *play_end_callback)
             .data_size = 0,
             .fetcher_buffer_size = SAP_SOURCE_DATA_BUF_SIZE,
             .src_type = SAP_DATA_SRC_FLASH,
+            .gain_ratio_percent = gain_ratio_percent,
             .play_end_callback = play_end_callback,
             .fmt = "MP3",
         };
     sap_send_msg(&msg, NULL);
+    return 1;
 }
 
 int sap_play_stream(const char *audio_fmt, uint32_t fetcher_buffer_size, uint32_t request_block_size, void *play_end_callback, SAP_PLAY_DATA_REQUEST_CALLBACK data_request_callback)
@@ -155,6 +163,7 @@ int sap_play_stream(const char *audio_fmt, uint32_t fetcher_buffer_size, uint32_
             .request_block_size = request_block_size,
             .fetcher_buffer_size = fetcher_buffer_size,
             .src_type = SAP_DATA_SRC_STREAM,
+            .gain_ratio_percent = SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT,
             .play_end_callback = play_end_callback,
             .fmt = audio_fmt,
             .data_request_callback = (SAP_PLAY_DATA_REQUEST_CALLBACK)data_request_callback,
@@ -243,7 +252,7 @@ static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
     for(uint32_t i = 0; i < sample_count; i++)
     {
         int32_t scaled = ((int32_t)pcm[i] * (int32_t)gain_percent *
-            ESP_VOLUME_TO_LOCAL_PROMPT_NUMERATOR) / ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR;
+            (int32_t)sap_info.gain_ratio_percent) / ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR;
         if(scaled > 32767)
         {
             scaled = 32767;
@@ -325,6 +334,11 @@ static int sap_start_play_inner(sap_msg_t *msg)
         }
         // sap_info.data_addr = msg->data_addr;
         sap_info.play_end_callback = msg->play_end_callback;
+        sap_info.gain_ratio_percent = msg->gain_ratio_percent;
+        mprintf("[AUDIO] local playback volume userPercent=%u gainRatioPercent=%u pcmGainPermille=%u\r\n",
+            (unsigned int)g_audio_play_pcm_gain_percent,
+            (unsigned int)sap_info.gain_ratio_percent,
+            ((unsigned int)g_audio_play_pcm_gain_percent * sap_info.gain_ratio_percent) / 25U);
         sap_info.decoder_handle = sap_info.cur_decoder->init();
 
         src_data_info_t src_data_info = {

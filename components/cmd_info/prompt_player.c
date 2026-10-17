@@ -52,6 +52,9 @@ typedef struct prompt_player_st
     #endif
     
     uint32_t combination_list[MAX_COMBINATION_COUNT];
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+    uint8_t combination_gain_ratios[MAX_COMBINATION_COUNT];
+#endif
 }prompt_player_t;
 
 
@@ -128,6 +131,26 @@ static void clean_play_queue()
 }
 
 
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+static uint8_t prompt_gain_ratio_percent(uint16_t voice_id)
+{
+#ifdef WAKEUP_DING_VOICE_ID
+    if(voice_id == WAKEUP_DING_VOICE_ID)
+    {
+        return WAKEUP_DING_GAIN_RATIO_PERCENT;
+    }
+#endif
+    return SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT;
+}
+
+static void prompt_play_next_combination(void)
+{
+    uint8_t index = prompt_player.combination_index++;
+    sap_play(prompt_player.combination_list[index], combination_callback,
+        prompt_player.combination_gain_ratios[index]);
+}
+#endif
+
 static int prompt_play_inner(voice_play_info_t *p_voice_play_info, bool from_callback)
 {
     uint16_t voice_id_buffer[MAX_COMBINATION_COUNT];
@@ -161,11 +184,17 @@ static int prompt_play_inner(voice_play_info_t *p_voice_play_info, bool from_cal
                 pop_from_play_queue();
                 return 1;
             }
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+            for(int i = 0; i < combination_number; i++)
+            {
+                prompt_player.combination_gain_ratios[i] = prompt_gain_ratio_percent(voice_id_buffer[i]);
+            }
+#endif
             prompt_player.combination_number = combination_number;
             prompt_player.combination_index = 0;
 
 			#if SIMPLE_AUDIO_PLAYER_ENABLE
-			sap_play(prompt_player.combination_list[prompt_player.combination_index++], combination_callback);
+			prompt_play_next_combination();
 			#else
             pause_audio_play_prompt(prompt_player.combination_list[prompt_player.combination_index++], 1, combination_callback);
 			#endif
@@ -243,7 +272,7 @@ static void combination_callback(int32_t play_cb_state)
     {
 		//播放下一个组合播报音
 		#if SIMPLE_AUDIO_PLAYER_ENABLE
-		sap_play(prompt_player.combination_list[prompt_player.combination_index++], combination_callback);
+		prompt_play_next_combination();
 		#else
 		pause_audio_play_prompt(prompt_player.combination_list[prompt_player.combination_index++], 1, combination_callback);
 		#endif
@@ -625,6 +654,13 @@ uint32_t prompt_play_by_multi_cmd_id(prompt_play_info_t *p_play_info, int number
         if (prompt_player.combination_number + combination_number <= MAX_COMBINATION_COUNT)
         {
             get_voice_addr_by_id(voice_id_buffer, &prompt_player.combination_list[prompt_player.combination_number], combination_number);
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+            for(int j = 0; j < combination_number; j++)
+            {
+                prompt_player.combination_gain_ratios[prompt_player.combination_number + j] =
+                    prompt_gain_ratio_percent(voice_id_buffer[j]);
+            }
+#endif
             prompt_player.combination_number += combination_number;
         }
     }
@@ -646,7 +682,7 @@ uint32_t prompt_play_by_multi_cmd_id(prompt_play_info_t *p_play_info, int number
     pause_asr(1, 1);
     #endif
 	#if SIMPLE_AUDIO_PLAYER_ENABLE
-	sap_play(prompt_player.combination_list[prompt_player.combination_index++], combination_callback);
+	prompt_play_next_combination();
 	#else
     pause_audio_play_prompt(prompt_player.combination_list[prompt_player.combination_index++], 1, combination_callback);
 	#endif
