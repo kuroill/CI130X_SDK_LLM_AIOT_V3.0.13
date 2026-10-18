@@ -7,6 +7,7 @@
 #include "FreeRTOS.h"
 #include "task.h"
 #include "ci130x_codec.h"
+#include "ci_log.h"
 #include "codec_manager.h"
 #include "user_config.h"
 #include "ci_conversation.generated.h"
@@ -119,6 +120,10 @@ void power_amplifier_on(void)
     {
         gpio_set_output_low_level(PD,pin_0);
     }
+    uint8_t level = gpio_get_input_level(PD,pin_0);
+    mprintf("[AUDIO_PA] requested=on gpioLevel=%u activeLevel=%u enabled=%u\r\n",
+        (unsigned int)level, (unsigned int)g_pa_pin_valid_level,
+        (unsigned int)(level == g_pa_pin_valid_level));
 }
 
 /**
@@ -135,6 +140,10 @@ void power_amplifier_off(void)
     {
         gpio_set_output_high_level(PD,pin_0);
     }
+    uint8_t level = gpio_get_input_level(PD,pin_0);
+    mprintf("[AUDIO_PA] requested=off gpioLevel=%u activeLevel=%u enabled=%u\r\n",
+        (unsigned int)level, (unsigned int)g_pa_pin_valid_level,
+        (unsigned int)(level == g_pa_pin_valid_level));
 }
 
 /**

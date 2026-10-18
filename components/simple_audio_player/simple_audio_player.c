@@ -30,6 +30,8 @@
 #define SAP_MAX_PCM_FRAME_SIZE (2048)
 #define SAP_MSG_QUEUE_LENGTH 10
 #define SAP_PCM_BUF_COUNT 4
+/* Keep the SDK local-player PA settling time for both playback paths. */
+#define AUDIO_PLAY_PA_SETTLE_MS 100U
 SemaphoreHandle_t fetch_sem =NULL;
 extern CiasAiotFuncParamTypedef gCiasAiotFuncParam;
 extern CiasAiotRunParamTypedef gCiasAiotRunParam;
@@ -103,6 +105,16 @@ static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken);
 
 static int32_t g_audio_play_gain = VOLUME_OUTPUT_MAX_PERCENT;
 static volatile uint16_t g_audio_play_pcm_gain_percent = 50U;
+
+/* Local playback and the system downlink owner hand off via SAP_STATE_IDLE.
+ * Keep PA state with its hardware executor, not the inactive Wi-Fi protocol. */
+typedef enum
+{
+    AUDIO_PA_STATE_UNKNOWN = 0,
+    AUDIO_PA_STATE_OFF,
+    AUDIO_PA_STATE_ON,
+}audio_pa_state_t;
+static audio_pa_state_t audio_pa_state = AUDIO_PA_STATE_UNKNOWN;
 
 /* Dialogue PCM amplitude is user_percent / 250; the request owns its ratio. */
 #define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 25000
@@ -273,23 +285,34 @@ static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
  */
 void audio_play_hw_pa_da_ctl(FunctionalState cmd, bool is_control_pa)
 {
-    // PA的操作需要在DAC关闭的情况下进行，不然会影响采音
+    /* Switch the PA only while HPOUT is muted. With AEC enabled, icodec_stop
+     * closes HPOUT without powering down the DAC or interrupting ADC capture. */
     if (ENABLE == cmd)
     {
-        icodec_start(CODEC_OUTPUT);
-        if (is_control_pa)
+        if (is_control_pa && (audio_pa_state != AUDIO_PA_STATE_ON))
         {
+            icodec_stop(CODEC_OUTPUT);
             power_amplifier_on();
+            vTaskDelay(pdMS_TO_TICKS(AUDIO_PLAY_PA_SETTLE_MS));
+            audio_pa_state = AUDIO_PA_STATE_ON;
         }
+        icodec_start(CODEC_OUTPUT);
     }
     else
     {
-        if (is_control_pa)
+        icodec_stop(CODEC_OUTPUT);
+        if (is_control_pa && (audio_pa_state != AUDIO_PA_STATE_OFF))
         {
             power_amplifier_off();
+            audio_pa_state = AUDIO_PA_STATE_OFF;
         }
-        icodec_stop(CODEC_OUTPUT);
     }
+    mprintf("[AUDIO_OUT] phase=%s hpoutMuted=%u paControl=%u dacAnalogCode=%u dacDigitalCode=%u\r\n",
+        (ENABLE == cmd) ? "active" : "idle",
+        (unsigned int)((CODEC->reg2b & (1U << 2)) == 0),
+        (unsigned int)is_control_pa,
+        (unsigned int)(CODEC->reg2d & 0x1fU),
+        (unsigned int)(CODEC->reg6 & 0xffU));
 }
 
 static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken)
@@ -416,17 +439,7 @@ static int sap_start_play_inner(sap_msg_t *msg)
         id3v2_size = 0;
         gap_index = 0;
         #endif
-#if (PLAYER_CONTROL_PA)
-        if(!gCiasAiotRunParam.pa_start_flag)
-        {
-            audio_play_hw_pa_da_ctl(ENABLE, true);
-            gCiasAiotRunParam.pa_start_flag =true;
-            mprintf("pa_on\r\n");
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-#else
-        audio_play_hw_pa_da_ctl(ENABLE,false);
-#endif
+        audio_play_hw_pa_da_ctl(ENABLE, PLAYER_CONTROL_PA != 0);
 
         if (format_info.src_data_size > 0 && src_type == SAP_DATA_SRC_FLASH)
         {

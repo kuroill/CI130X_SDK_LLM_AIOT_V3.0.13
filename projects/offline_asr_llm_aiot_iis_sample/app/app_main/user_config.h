@@ -247,7 +247,7 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
     
 //**播放器配置  
 #define AUDIO_PLAYER_ENABLE             1   //本地唤醒提示音仍由V3官方播放器播放
-#define PLAYER_CONTROL_PA               0   //是否有播放器控音频功放开关。0:功放常开,1:播放器在需要播放时才打开,但可能增加一点每一次播放的延迟时间
+#define PLAYER_CONTROL_PA               1   //空闲关闭功放；本地提示音与ESP下行均先静音、开PA稳定后播放，结束先静音再关PA。
 #define VOLUME_MAX                      7   //设置音量调节的上限值，对应硬件支持的最大音量。
 #define VOLUME_MIN                      1   //设置音量调节的下限值，对应最小音量。
 #define VOLUME_DEFAULT                  VOLUME_MAX   //ESP同步前使用最大本地回退档位。

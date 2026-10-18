@@ -120,8 +120,6 @@ static void clean_play_queue()
     }
     #if (PLAYER_CONTROL_PA)
     audio_play_hw_pa_da_ctl(DISABLE,true);
-    extern CiasAiotRunParamTypedef gCiasAiotRunParam;
-    gCiasAiotRunParam.pa_start_flag =false;
     mprintf("pa_off\r\n");
     #else
     audio_play_hw_pa_da_ctl(DISABLE,false);

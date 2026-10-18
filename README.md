@@ -25,6 +25,42 @@ https://www.chipintelli.com/zh-cn/page/151.html
 
 编译环境安装说明、芯片手册、开发板资料等，详见启英泰伦语音AI平台网址：https://aiplatform.chipintelli.com
 
+## 空闲功放静音验证
+
+针对“唤醒后未说话时喇叭持续有噪音”，当前实现将本地播放器和 ESP 下行的
+`PLAYER_CONTROL_PA` 设为 1：空闲关闭功放，起播先静音 HPOUT、开启 PA、等待
+SDK 原有的 100ms 稳定时间，再恢复 HPOUT；结束先静音 HPOUT 再关闭 PA。
+DAC 保持上电，连续 ADC、AEC 尾音与真人打断保留；DAC/MIC/REF 增益、用户音量
+及提示音 50% 比例不变。PA 状态收口在音频硬件控制函数内，组合提示音复用已开启
+的 PA；不再引用当前旧 Wi-Fi 运行结构体中不存在的 `pa_start_flag`。
+
+自然 FINISH 仍等待 DAC 队列排空后关 PA；中断、超时和 peer 清理通过原下行
+owner 关闭，重复 STOP 不得误关已接管扬声器的本地提示音。每次从空闲起播增加
+约 100ms 准备时间。ESP 的 START 专用 ACK/调用预算配套为 600/1500ms，以覆盖
+250ms 本地播放器交接、100ms PA 稳定等待及一次重试；其他命令预算不变。
+先由用户更新 ESP，再在 Windows 按下一节完整重建并更新 CI。无需修改 IoT 或协议。
+
+实现与主机静态验证完成，尚未证明现场噪音消除。保持原音量，在单台测试机验证：
+
+| 步骤 | 预期行为和关键日志 |
+| --- | --- |
+| 启动，唤醒后安静等待，再观察返回待唤醒 | 唤醒 ding 正常；ding 结束附近出现 `[AUDIO_PA] requested=off ... enabled=0` 和 `[AUDIO_OUT] phase=idle hpoutMuted=1 paControl=1`，持续监听时无底噪。PA 控制线原有有效电平检测保留，不写死高低电平。 |
+| 短回复、长回复各听完整三次 | 起播有 `requested=on ... enabled=1`、`phase=active hpoutMuted=0`；首尾字完整，结束有 `[DOWNLINK] stopped ... pa=off`、`finish complete`，ESP 为 `graceful=true`。正常同步音量后 DAC 寄存器应保持 `dacAnalogCode=31 dacDigitalCode=255`。 |
+| 播放中真人插话，再说下一句；退出后重新唤醒，重复十轮 | 能打断并继续对话，旧 STOP 不切掉下一段 ding/回复；无需重新上电恢复，不能以静音为代价丢失采音。 |
+| 先在空闲、再在播放期单独重启 ESP | CI 原 peer 清理及上行恢复日志继续出现；停止后 PA 关闭，ESP 恢复后可以再次唤醒和完整播放。 |
+
+噪音仍在时，对齐完整 ESP/CI 日志：缺少上述关闭日志先查固件版本与退出路径；
+`hpoutMuted=0` 或 `enabled=1` 表示输出仍开启；两者均显示关闭仍有噪音，需要
+实测 PA MUTE 引脚和模拟输出。`gpioLevel` 是 GPIO 数据寄存器读值，并非实际电压
+或声学验证。只在开关瞬间出现“啪”声，需单独核对 PA/HPOUT 时序；`pcm_timeout`
+或双端 `[CI_PCM]` 不一致仍按数字链路问题排查；不降低对话音量掩盖问题。
+
+macOS 可运行实际 C 函数的主机模拟，不生成固件：
+
+```sh
+python3 script/test_pa_idle_mute.py
+```
+
 ## Windows PowerShell 构建
 
 CI 本地唤醒 ding（`voice_id=1000`）的 PCM 增益调整为当前 ESP 对话增益的 50%，

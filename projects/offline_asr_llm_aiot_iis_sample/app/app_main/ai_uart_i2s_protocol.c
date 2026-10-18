@@ -228,6 +228,11 @@ static void stop_downlink(void)
     {
         cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
         cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
+#if PLAYER_CONTROL_PA
+        /* Only the active downlink owner may close the PA. A duplicate STOP
+         * must not mute a later local prompt which now owns the speaker. */
+        audio_play_hw_pa_da_ctl(DISABLE, true);
+#endif
         /* Let the AEC owner drain the acoustic/reference tail and restore ALC.
          * Writing IDLE directly bypasses that cleanup and can leak the speaker
          * tail into the next uplink while CI_SS_AEC_WORK_STATE stays stale. */
@@ -246,8 +251,9 @@ static void stop_downlink(void)
     if(was_active)
     {
         mprintf(
-            "[DOWNLINK] stopped bytes=%u rx=drain pa=keep-on aec_tail=%u\r\n",
+            "[DOWNLINK] stopped bytes=%u rx=drain pa=%s aec_tail=%u\r\n",
             (unsigned int)stopped_bytes,
+            PLAYER_CONTROL_PA ? "off" : "keep-on",
             (unsigned int)aec_tail_armed);
         mprintf("[CI_PCM] stage=dac_queued nonzeroSamples=%lu nonzeroHash=%08lx peak=%lu stereoMismatches=%lu audibleVerified=false\r\n",
             (unsigned long)stopped_nonzero_samples,
@@ -445,12 +451,13 @@ static uint8_t start_downlink(void)
     downlink_codec_started = 1;
     /* Arm the V3 AEC before the DAC can emit the first queued sample. */
     ciss_set(CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING);
+    /* Keep the DMA feed silent throughout PA startup. Apply the unchanged
+     * runtime gain before opening HPOUT and accepting ESP audio. */
+    cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
     cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
-    cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
-    audio_play_hw_pa_da_ctl(ENABLE, true);
-    /* Codec startup can restore its default DAC gain. Reapply the runtime
-     * volume before acknowledging that downlink playback is ready. */
     audio_play_apply_output_gain();
+    audio_play_hw_pa_da_ctl(ENABLE, true);
+    cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
     downlink_enabled = 1;
     xSemaphoreGive(downlink_mutex);
     send_state(AI_UART_STATE_DOWNLINK_PLAYING);
