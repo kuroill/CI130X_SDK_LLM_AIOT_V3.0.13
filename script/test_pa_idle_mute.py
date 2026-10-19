@@ -135,6 +135,9 @@ static void send_state(int state) {
     assert(downlink_enabled && settle_delays > 0);
     ++state_reports;
 }
+static void cm_report_output_diagnostics(int index, const char *owner) {
+    assert(index == PLAY_CODEC_ID && strcmp(owner, "downlink") == 0);
+}
 static int cm_start_codec(int index, io_direction_t dir);
 static int cm_stop_codec(int index, io_direction_t dir);
 static int cm_get_codec_busy_buffer_number(int index, io_direction_t dir) {

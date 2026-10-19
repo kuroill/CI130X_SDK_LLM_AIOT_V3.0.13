@@ -676,55 +676,170 @@ void audio_debug_uart0_upload(int16_t *left, int16_t *right, ci_wrapfft_audio *p
 }
 #endif
 #if USE_AUDIO_UPLOAD_BY_IIS
+/* One mailbox/audio producer collects a complete window. A bounded snapshot
+ * ring transfers diagnostics to the existing heartbeat task: no UART, heap or
+ * blocking call is allowed in the audio/mailbox interrupt. */
+#define AEC_PATH_REPORT_CAPACITY 4U
+#define AEC_PATH_FIRST_WINDOW_FRAMES 8U
+#define AEC_PATH_WINDOW_FRAMES 64U
+typedef struct
+{
+    uint32_t frames;
+    uint32_t samples;
+    uint32_t aec_frames;
+    uint64_t abs_sum[3];
+    int64_t sum[3];
+    uint32_t peak[3];
+    uint32_t clipped[3];
+}aec_path_window_t;
+
+typedef struct
+{
+    aec_path_window_t window;
+    uint32_t playback;
+    uint32_t total_frames;
+    uint32_t phase; /* 0=first, 1=playing, 2=end */
+    uint32_t pga_reg[2];
+    uint32_t adc_digital[2];
+    uint32_t alc[2];
+    uint32_t pga_control_mask;
+    uint32_t dac_analog;
+    uint32_t dac_digital;
+}aec_path_report_t;
+
+static aec_path_window_t aec_path_window;
+static uint32_t aec_path_playback;
+static uint32_t aec_path_total_frames;
+static aec_path_report_t aec_path_reports[AEC_PATH_REPORT_CAPACITY];
+static volatile uint32_t aec_path_report_head;
+static volatile uint32_t aec_path_report_count;
+static volatile uint32_t aec_path_dropped_reports;
+
+static void queue_aec_path_report(uint32_t phase)
+{
+    aec_path_report_t report = {0};
+    report.window = aec_path_window;
+    report.playback = aec_path_playback;
+    report.total_frames = aec_path_total_frames;
+    report.phase = phase;
+    /* Preserve the previous interrupt mask in both task and mailbox contexts.
+     * Only snapshot copies/register reads are inside this short critical section. */
+    UBaseType_t saved_mask = portSET_INTERRUPT_MASK_FROM_ISR();
+    if(aec_path_report_count < AEC_PATH_REPORT_CAPACITY)
+    {
+        for(uint32_t i = 0; i < 2U; i++)
+        {
+            report.pga_reg[i] = CODEC->pga_gain_reg[i];
+            report.adc_digital[i] = CODEC->adc_dig_gain_reg[i] & 0xffU;
+            report.alc[i] = (CODEC->alc_reg[i].reg49 >> 6) & 1U;
+        }
+        report.pga_control_mask = (CODEC->rega >> 4) & 3U;
+        report.dac_analog = CODEC->reg2d & 0x1fU;
+        report.dac_digital = CODEC->reg6 & 0xffU;
+        uint32_t tail = (aec_path_report_head + aec_path_report_count) % AEC_PATH_REPORT_CAPACITY;
+        aec_path_reports[tail] = report;
+        aec_path_report_count++;
+    }
+    else
+    {
+        aec_path_dropped_reports++;
+    }
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(saved_mask);
+    memset(&aec_path_window, 0, sizeof(aec_path_window));
+}
+
 static void report_aec_path_levels(ci_wrapfft_audio *audio, uint32_t sample_count)
 {
-    static uint32_t playing_frames = 0;
-    if(CI_SS_PLAY_STATE_PLAYING != ciss_get(CI_SS_PLAY_STATE) ||
-       !ciss_get(CI_SS_AEC_WORK_STATE) ||
-       NULL == audio || NULL == audio->mic[0] || NULL == audio->ref[0] ||
+    if(CI_SS_PLAY_STATE_PLAYING != ciss_get(CI_SS_PLAY_STATE))
+    {
+        if(aec_path_window.samples)
+        {
+            queue_aec_path_report(2U);
+        }
+        aec_path_total_frames = 0;
+        return;
+    }
+    if(NULL == audio || NULL == audio->mic[0] || NULL == audio->ref[0] ||
        NULL == audio->dst[0] || 0 == sample_count)
     {
-        playing_frames = 0;
         return;
     }
-
-    playing_frames++;
-    if(0 != (playing_frames % 64U))
+    if(aec_path_total_frames == 0)
     {
-        return;
+        aec_path_playback++;
     }
-
-    uint64_t mic_abs_sum = 0;
-    uint64_t ref_abs_sum = 0;
-    uint64_t dst_abs_sum = 0;
-    uint32_t mic_peak = 0;
-    uint32_t ref_peak = 0;
-    uint32_t dst_peak = 0;
+    const int16_t *channels[3] = {audio->mic[0], audio->ref[0], audio->dst[0]};
     for(uint32_t i = 0; i < sample_count; i++)
     {
-        uint32_t mic_abs = audio->mic[0][i] < 0 ?
-            (uint32_t)(-(int32_t)audio->mic[0][i]) : (uint32_t)audio->mic[0][i];
-        uint32_t ref_abs = audio->ref[0][i] < 0 ?
-            (uint32_t)(-(int32_t)audio->ref[0][i]) : (uint32_t)audio->ref[0][i];
-        uint32_t dst_abs = audio->dst[0][i] < 0 ?
-            (uint32_t)(-(int32_t)audio->dst[0][i]) : (uint32_t)audio->dst[0][i];
-        mic_abs_sum += mic_abs;
-        ref_abs_sum += ref_abs;
-        dst_abs_sum += dst_abs;
-        if(mic_abs > mic_peak) mic_peak = mic_abs;
-        if(ref_abs > ref_peak) ref_peak = ref_abs;
-        if(dst_abs > dst_peak) dst_peak = dst_abs;
+        for(uint32_t channel = 0; channel < 3U; channel++)
+        {
+            int32_t value = channels[channel][i];
+            uint32_t magnitude = (uint32_t)(value < 0 ? -value : value);
+            aec_path_window.abs_sum[channel] += magnitude;
+            aec_path_window.sum[channel] += value;
+            if(magnitude > aec_path_window.peak[channel])
+            {
+                aec_path_window.peak[channel] = magnitude;
+            }
+            if(value == -32768 || value == 32767)
+            {
+                aec_path_window.clipped[channel]++;
+            }
+        }
     }
+    aec_path_window.samples += sample_count;
+    aec_path_window.frames++;
+    aec_path_window.aec_frames += ciss_get(CI_SS_AEC_WORK_STATE) ? 1U : 0U;
+    aec_path_total_frames++;
+    if(aec_path_total_frames == AEC_PATH_FIRST_WINDOW_FRAMES ||
+       aec_path_window.frames >= AEC_PATH_WINDOW_FRAMES)
+    {
+        queue_aec_path_report(aec_path_total_frames == AEC_PATH_FIRST_WINDOW_FRAMES ? 0U : 1U);
+    }
+}
 
-    mprintf(
-        "[AEC_PATH] micAbs=%u refAbs=%u dstAbs=%u micPeak=%u refPeak=%u dstPeak=%u dstToMicPermille=%u\r\n",
-        (unsigned int)(mic_abs_sum / sample_count),
-        (unsigned int)(ref_abs_sum / sample_count),
-        (unsigned int)(dst_abs_sum / sample_count),
-        (unsigned int)mic_peak,
-        (unsigned int)ref_peak,
-        (unsigned int)dst_peak,
-        (unsigned int)((dst_abs_sum * 1000U) / (mic_abs_sum ? mic_abs_sum : 1U)));
+void audio_pre_rslt_report_diagnostics(void)
+{
+    if(check_curr_trap())
+    {
+        return;
+    }
+    aec_path_report_t report;
+    uint32_t dropped;
+    UBaseType_t saved_mask = portSET_INTERRUPT_MASK_FROM_ISR();
+    if(aec_path_report_count == 0)
+    {
+        portCLEAR_INTERRUPT_MASK_FROM_ISR(saved_mask);
+        return;
+    }
+    report = aec_path_reports[aec_path_report_head];
+    aec_path_report_head = (aec_path_report_head + 1U) % AEC_PATH_REPORT_CAPACITY;
+    aec_path_report_count--;
+    dropped = aec_path_dropped_reports;
+    portCLEAR_INTERRUPT_MASK_FROM_ISR(saved_mask);
+
+    const aec_path_window_t *w = &report.window;
+    const char *phase = report.phase == 0U ? "first" : (report.phase == 1U ? "playing" : "end");
+    mprintf("[AEC_PATH] playback=%lu phase=%s frames=%lu totalFrames=%lu samples=%lu aecFrames=%lu micAbs=%lu refAbs=%lu dstAbs=%lu micPeak=%lu refPeak=%lu dstPeak=%lu micClipPermille=%lu refClipPermille=%lu dstClipPermille=%lu micMean=%ld refMean=%ld dstMean=%ld droppedReports=%lu\r\n",
+        (unsigned long)report.playback, phase, (unsigned long)w->frames,
+        (unsigned long)report.total_frames, (unsigned long)w->samples,
+        (unsigned long)w->aec_frames,
+        (unsigned long)(w->abs_sum[0] / w->samples),
+        (unsigned long)(w->abs_sum[1] / w->samples),
+        (unsigned long)(w->abs_sum[2] / w->samples),
+        (unsigned long)w->peak[0], (unsigned long)w->peak[1], (unsigned long)w->peak[2],
+        (unsigned long)((uint64_t)w->clipped[0] * 1000U / w->samples),
+        (unsigned long)((uint64_t)w->clipped[1] * 1000U / w->samples),
+        (unsigned long)((uint64_t)w->clipped[2] * 1000U / w->samples),
+        (long)(w->sum[0] / w->samples), (long)(w->sum[1] / w->samples),
+        (long)(w->sum[2] / w->samples), (unsigned long)dropped);
+    mprintf("[AUDIO_GAIN] playback=%lu totalFrames=%lu micPgaReg=0x%02lx refPgaReg=0x%02lx micDigitalCode=%lu refDigitalCode=%lu micAlc=%lu refAlc=%lu pgaControlMask=%lu dacAnalogCode=%lu dacDigitalCode=%lu evidence=window_end_registers\r\n",
+        (unsigned long)report.playback, (unsigned long)report.total_frames,
+        (unsigned long)report.pga_reg[0], (unsigned long)report.pga_reg[1],
+        (unsigned long)report.adc_digital[0], (unsigned long)report.adc_digital[1],
+        (unsigned long)report.alc[0], (unsigned long)report.alc[1],
+        (unsigned long)report.pga_control_mask,
+        (unsigned long)report.dac_analog, (unsigned long)report.dac_digital);
 }
 
 void audio_pre_rslt_upload_by_iis(int16_t *left, int16_t *right, ci_wrapfft_audio *p_wrapfft_audio)

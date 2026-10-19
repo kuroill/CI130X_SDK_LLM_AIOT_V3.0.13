@@ -189,6 +189,8 @@ extern int cm_config_codec(int codec_index, io_direction_t io_dir, cm_sound_info
 extern int cm_start_codec(int codec_index, io_direction_t io_dir);
 
 extern int cm_stop_codec(int codec_index, io_direction_t io_dir);
+/* Task-only snapshot after stopping output; never prints in the DMA ISR. */
+extern void cm_report_output_diagnostics(int codec_index, const char *owner);
 
 /* IIS0 slave output lifecycle; task context and one serialized PCM producer.
  * 0 = complete, 1 = retry later, -1 = invalid configuration/buffer ownership.

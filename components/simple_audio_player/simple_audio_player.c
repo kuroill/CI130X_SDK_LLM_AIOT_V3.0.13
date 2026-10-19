@@ -79,6 +79,9 @@ typedef struct
     uint32_t source_buf_bytes_left;
     uint32_t source_buf_offset;
     uint32_t decode_frame_count;
+    uint32_t diagnostic_pcm_samples;
+    uint32_t diagnostic_pcm_peak;
+    uint32_t diagnostic_pcm_clipped;
     // uint32_t source_frame_size;
     uint32_t frame_pcm_size;
     // uint32_t total_pcm_size;
@@ -274,6 +277,16 @@ static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
             scaled = -32768;
         }
         pcm[i] = (int16_t)scaled;
+        uint32_t magnitude = (uint32_t)(scaled < 0 ? -scaled : scaled);
+        if(magnitude > sap_info.diagnostic_pcm_peak)
+        {
+            sap_info.diagnostic_pcm_peak = magnitude;
+        }
+        if(scaled == -32768 || scaled == 32767)
+        {
+            sap_info.diagnostic_pcm_clipped++;
+        }
+        sap_info.diagnostic_pcm_samples++;
     }
 }
 
@@ -336,6 +349,9 @@ static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken)
 static int sap_start_play_inner(sap_msg_t *msg)
 {
     int ret = 0;
+    sap_info.diagnostic_pcm_samples = 0;
+    sap_info.diagnostic_pcm_peak = 0;
+    sap_info.diagnostic_pcm_clipped = 0;
     // uint8_t *tmp_buf;
     do
     {
@@ -716,6 +732,14 @@ static int sap_stop_play_inner(int32_t play_cb_state)
 
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
     cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
+    cm_report_output_diagnostics(PLAY_CODEC_ID, "local");
+    mprintf("[LOCAL_PCM] samples=%lu peak=%lu clippedSamples=%lu gainRatioPercent=%u dacAnalogCode=%u dacDigitalCode=%u\r\n",
+        (unsigned long)sap_info.diagnostic_pcm_samples,
+        (unsigned long)sap_info.diagnostic_pcm_peak,
+        (unsigned long)sap_info.diagnostic_pcm_clipped,
+        (unsigned int)sap_info.gain_ratio_percent,
+        (unsigned int)(CODEC->reg2d & 0x1fU),
+        (unsigned int)(CODEC->reg6 & 0xffU));
     sap_info.cur_decoder->deinit(sap_info.decoder_handle);
     sap_info.decoder_handle = NULL;
     if (sap_info.pcm_buffer != NULL)

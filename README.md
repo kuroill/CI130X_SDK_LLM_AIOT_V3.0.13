@@ -61,6 +61,56 @@ macOS 可运行实际 C 函数的主机模拟，不生成固件：
 python3 script/test_pa_idle_mute.py
 ```
 
+## 播放期滋滋声取证（2026-10-19）
+
+本轮只增加 CI 诊断，不调整用户音量、提示音比例、DAC/MIC/REF 增益、IIS 时钟、
+DMA 容量、AEC 参数或播放期打断门槛。尚未证明杂音根因或声音已恢复正常。
+
+最新同一次报时回复中，服务端 Opus 解码后按现有音量及淡入淡出处理的 PCM，
+与 ESP 和 CI 的 `nonzeroSamples=31731 nonzeroHash=d204c3ce peak=9056` 一致。
+这支持该段非零内容完整到达 DAC 队列，不能证明静音间隔、DMA 时序和模拟输出正确。
+CI 的 REF 同时出现多次 `refPeak=32768`、`refAbs` 接近满幅，需要查明削顶持续比例
+和实际生效的输入增益。两次提前停播由服务端 ASR partial 确认后发送 interrupt；
+同期 VAD 未检出语音，其中一段 partial 与回复内容相似，回声误识别尚待进一步验证。
+不以降低音量或关闭真人打断掩盖这些问题。
+
+Windows 按下节构建流程重建并刷入 CI；本轮无需更新 ESP 或 IoT。启动必须出现：
+
+```text
+[AUDIO_DIAG] version=1 aec=windowed_task_logs dma=scheduled_blocks gain=unchanged
+```
+
+保持当前 100% 音量，完整保存 ESP 和 CI 从启动到播放结束的日志。按顺序听启动
+内置播报、唤醒 ding、安静听一段长回复，最后再用真人插话检验打断和下一轮恢复。
+新增日志覆盖短 ding：首个有效窗口为 8 帧，之后每 64 帧汇总，结束时保留不足一窗
+的数据。每个窗口统计所有有效帧，而非只抽取最后一帧。
+
+| 日志与字段 | 预期和失败区分 |
+| --- | --- |
+| `[LOCAL_PCM] peak/clippedSamples/gainRatioPercent` | 对照唤醒 ding 的实际衰减后 PCM。比例仍为 50%；可与 ESP 内置播报及对话的 `[CI_PCM]` 峰值比较，但峰值不代表声学响度。 |
+| `[AEC_PATH] playback/phase/frames/samples/aecFrames` | 同一播放的 `first/playing/end` 窗口。短音也应有记录；`aecFrames` 表示窗口内 AEC 工作帧数。 |
+| `micClipPermille/refClipPermille/dstClipPermille` | 16-bit 正负满幅样本占比，1000 表示全部样本达到边界。仅峰值到顶与长时间削顶由此区分；`micMean/refMean/dstMean` 辅助查看直流偏置。 |
+| `[AUDIO_GAIN]` | 与同 `playback/totalFrames` 窗口配对。记录窗口结束时真实 PGA 寄存器、ADC digital code、ALC 和 DAC code，不是配置文件的期望值。PGA 寄存器低 5 位是 PGA 档位、高位含前级增益；`pgaControlMask` 的 bit1/bit0 分别表示 MIC/REF 是否由 ALC 控制 PGA。 |
+| `[AUDIO_DMA] owner=local/downlink` | 每次播放停止后输出一次。`resumedGaps/resumedZeroBlocks` 只统计真实 PCM 缓冲之间插入驱动零缓冲、随后又恢复 PCM 的情况；正常连续供数应为 0。`startupZeroBlocks` 为首段 PCM 前的补零，`tailZeroBlocks` 为末段后的待定零尾，不直接判为断粮。`blockUs` 依据配置采样率计算，非时钟实测。 |
+| `droppedReports` | 诊断环形缓冲满时丢弃的报告数，区别于音频丢帧；非零说明日志消费者未及时读取。 |
+| ESP `reason=speech_recognized` / 服务端 `[BARGE] source=partial` | 表示 ASR 临时文字触发取消；对齐 partial 内容、音频时间范围、VAD 与 REF 削顶，不能当作网络断流或硬件自行停播。 |
+
+ADC/REF 和输出诊断使用有界静态存储，不申请音频堆缓冲。AEC 汇总由原心跳 task
+打印，音频/mailbox ISR 只累计和发布快照；DMA ISR 只更新计数。`AUDIO_DMA` 的证据
+是已调度的 DMA 地址，不是扬声器实际发声或电压测量。双端 PCM 一致且中间补零为 0
+仍有滋滋声时，应继续测 DAC/HPOUT、PA 供电及声学输出，不能继续归因于 Opus 断粮。
+
+主机模拟与相关回归（不生成正式 CI 固件）：
+
+```sh
+python3 script/test_audio_noise_diagnostics.py
+python3 script/test_iis_peer_recovery.py
+python3 script/test_pa_idle_mute.py
+python3 script/test_downlink_pcm_trace.py
+python3 script/test_aec_codec_gain.py
+python3 script/test_ci_build_headers.py
+```
+
 ## Windows PowerShell 构建
 
 CI 本地唤醒 ding（`voice_id=1000`）的 PCM 增益调整为当前 ESP 对话增益的 50%，

@@ -15,6 +15,19 @@
 
 #define USE_CODEC  1        //FPGA调试不了CODEC，所以屏蔽
 
+/* Scheduled DMA blocks, not an acoustic completion measurement. A zero run
+ * is classified as an internal gap only when real PCM resumes after it. */
+typedef struct
+{
+    uint32_t pcm_blocks;
+    uint32_t zero_blocks;
+    uint32_t startup_zero_blocks;
+    uint32_t resumed_gaps;
+    uint32_t resumed_zero_blocks;
+    uint32_t max_resumed_zero_blocks;
+    uint32_t pending_zero_blocks;
+}cm_output_diagnostics_t;
+
 typedef struct
 {
     QueueHandle_t busy_queue;                           // 使用中的buffer队列
@@ -43,6 +56,7 @@ typedef enum
 typedef struct
 {
     volatile cm_slave_output_state_t slave_output_state;
+    volatile cm_output_diagnostics_t output_diagnostics;
     void (*callback_func)(void);                    //指针数组，用于保存每个CODEC的事件回调函数    
     cm_codec_hw_info_t codec_hw_info;               //用于保存CODEC接口（IIS,DMA,IIC等）相关配置。
     cm_sound_info_t play_sound_info;                //用于保存音频相关配置信息。
@@ -609,8 +623,69 @@ int cm_config_codec(int codec_index, io_direction_t io_dir, cm_sound_info_t * so
     return 0;
 }
 
+static void cm_trace_output_block(codec_info_t *info, uint32_t address)
+{
+    volatile cm_output_diagnostics_t *trace = &info->output_diagnostics;
+    if(address == (uint32_t)cm.zero_buffer)
+    {
+        trace->zero_blocks++;
+        if(trace->pcm_blocks == 0)
+        {
+            trace->startup_zero_blocks++;
+        }
+        else
+        {
+            trace->pending_zero_blocks++;
+        }
+    }
+    else
+    {
+        trace->pcm_blocks++;
+        if(trace->pending_zero_blocks)
+        {
+            trace->resumed_gaps++;
+            trace->resumed_zero_blocks += trace->pending_zero_blocks;
+            if(trace->pending_zero_blocks > trace->max_resumed_zero_blocks)
+            {
+                trace->max_resumed_zero_blocks = trace->pending_zero_blocks;
+            }
+            trace->pending_zero_blocks = 0;
+        }
+    }
+}
+
+void cm_report_output_diagnostics(int codec_index, const char *owner)
+{
+    if(check_curr_trap() || codec_index < 0 || codec_index >= MAX_CODEC_NUM ||
+       !cm.reg_flag[codec_index])
+    {
+        return;
+    }
+    codec_info_t *info = &cm.codec_info[codec_index];
+    cm_output_diagnostics_t trace;
+    uint32_t channels, sample_rate, block_bytes;
+    portENTER_CRITICAL();
+    trace = info->output_diagnostics;
+    channels = info->play_sound_info.channel_flag == 3 ? 2U : 1U;
+    sample_rate = info->play_sound_info.sample_rate;
+    block_bytes = info->play_buffer_info.block_size;
+    portEXIT_CRITICAL();
+    uint32_t block_us = sample_rate ?
+        (uint32_t)(((uint64_t)block_bytes * 1000000U) /
+                   (sample_rate * channels * sizeof(int16_t))) : 0U;
+    mprintf("[AUDIO_DMA] owner=%s codec=%d sampleRate=%lu channels=%lu blockBytes=%lu blockUs=%lu pcmBlocks=%lu zeroBlocks=%lu startupZeroBlocks=%lu resumedGaps=%lu resumedZeroBlocks=%lu maxResumedZeroBlocks=%lu tailZeroBlocks=%lu evidence=scheduled_blocks\r\n",
+        owner, codec_index, (unsigned long)sample_rate, (unsigned long)channels,
+        (unsigned long)block_bytes, (unsigned long)block_us,
+        (unsigned long)trace.pcm_blocks, (unsigned long)trace.zero_blocks,
+        (unsigned long)trace.startup_zero_blocks, (unsigned long)trace.resumed_gaps,
+        (unsigned long)trace.resumed_zero_blocks,
+        (unsigned long)trace.max_resumed_zero_blocks,
+        (unsigned long)trace.pending_zero_blocks);
+}
+
 static void cm_start_output_dma(codec_info_t *code_info_p, cm_slave_output_state_t state)
 {
+    memset((void *)&code_info_p->output_diagnostics, 0, sizeof(code_info_p->output_diagnostics));
     iis_base_t IISx = code_info_p->codec_hw_info.output_iis.IISx;
     IISDMAChax iis_dma_channel = get_iis_dma_channel(IISx);
     play_buffer_queue_t *play_buffer_queue = &code_info_p->play_buffer_queue;
@@ -626,15 +701,18 @@ static void cm_start_output_dma(codec_info_t *code_info_p, cm_slave_output_state
     }
 
     play_buffer_queue->data_current_addr = play_buffer_queue->data_begin_addr;
+    cm_trace_output_block(code_info_p, play_buffer_queue->data_current_addr);
     IISxDMA_TADDR0(IISDMA0,iis_dma_channel,play_buffer_queue->data_current_addr);
     play_buffer_queue->data_current_addr += code_info_p->play_buffer_info.block_size;
     if (play_buffer_queue->data_current_addr < play_buffer_queue->data_end_addr)
     {
+        cm_trace_output_block(code_info_p, play_buffer_queue->data_current_addr);
         IISxDMA_TADDR1(IISDMA0,iis_dma_channel,play_buffer_queue->data_current_addr);
         play_buffer_queue->data_current_addr += code_info_p->play_buffer_info.block_size;
     }
     else
     {
+        cm_trace_output_block(code_info_p, (uint32_t)cm.zero_buffer);
         IISxDMA_TADDR1(IISDMA0,iis_dma_channel,(uint32_t)&cm.zero_buffer[0]);
     }
     play_buffer_queue->last_data_begin_addr = 0;
@@ -1244,6 +1322,7 @@ void cm_output_interrupt_handler(IISDMAChax dma_channel, BaseType_t * xHigherPri
         play_buffer_queue->data_current_addr = play_buffer_queue->data_begin_addr;        
     }
 
+    cm_trace_output_block(code_info_p, play_buffer_queue->data_current_addr);
     int used_buffer_index = IISDMA_TX_ADDR_Get(IISDMA0, dma_channel);
     if(0 == used_buffer_index)
     {

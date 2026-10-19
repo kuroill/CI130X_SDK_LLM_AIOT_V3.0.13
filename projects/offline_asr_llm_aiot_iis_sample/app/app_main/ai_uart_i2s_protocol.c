@@ -250,6 +250,7 @@ static void stop_downlink(void)
 
     if(was_active)
     {
+        cm_report_output_diagnostics(PLAY_CODEC_ID, "downlink");
         mprintf(
             "[DOWNLINK] stopped bytes=%u rx=drain pa=%s aec_tail=%u\r\n",
             (unsigned int)stopped_bytes,
@@ -847,12 +848,16 @@ static void heartbeat_task(void *arg)
         }
         audio_pre_rslt_request_start();
         report_aec_runtime();
+#if USE_AUDIO_UPLOAD_BY_IIS
+        audio_pre_rslt_report_diagnostics();
+#endif
         vTaskDelay(pdMS_TO_TICKS(AI_UART_TASK_POLL_MS));
     }
 }
 
 void ai_uart_i2s_protocol_init(void)
 {
+    mprintf("[AUDIO_DIAG] version=1 aec=windowed_task_logs dma=scheduled_blocks gain=unchanged\r\n");
     BaseType_t task_created;
     send_mutex = xSemaphoreCreateMutex();
     downlink_mutex = xSemaphoreCreateMutex();

@@ -164,7 +164,7 @@ static int IISDMA_TX_ADDR_Get(int d,int c) { return 0; }
     source += types
     for name in ("iis_tx_try_enable",):
         source += function(IIS, name)
-    for name in ("get_iis_dma_channel", "cm_start_output_dma", "cm_is_external_slave_output",
+    for name in ("get_iis_dma_channel", "cm_trace_output_block", "cm_start_output_dma", "cm_is_external_slave_output",
                  "cm_try_start_slave_output", "cm_cancel_slave_output", "cm_output_interrupt_handler"):
         source += function(CODEC, name)
     source += r'''
@@ -472,6 +472,8 @@ typedef struct { uint8_t type, seq; uint16_t len; uint8_t payload[8]; } ai_uart_
 typedef struct { int msg_type; } sys_msg_t;
 enum { SYS_MSG_TYPE_AI_UART_TIMEOUT=143 };
 #define AI_UART_CONTROL_UART 0
+#define USE_AUDIO_UPLOAD_BY_IIS 1
+static void audio_pre_rslt_report_diagnostics(void) { assert(!in_isr); }
 #define AI_UART_TASK_POLL_MS 50
 #define CI_CONVERSATION_COMMAND_SET_STATE 0x29
 #define CI_CONVERSATION_STATE_INACTIVE 0

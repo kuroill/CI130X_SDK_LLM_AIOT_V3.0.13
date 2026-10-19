@@ -34,6 +34,9 @@ void audio_pre_rslt_start(void);
 /* Heartbeat posts bounded work; only the system-message task handles it. */
 void audio_pre_rslt_request_start(void);
 void audio_pre_rslt_handle_start(void);
+/* USE_AUDIO_UPLOAD_BY_IIS: heartbeat task drains bounded snapshots;
+ * audio/ISR producers never print. */
+void audio_pre_rslt_report_diagnostics(void);
 /**
  * @}
  */
