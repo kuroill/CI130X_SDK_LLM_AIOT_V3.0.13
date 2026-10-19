@@ -230,9 +230,11 @@ const aec_config_t aec_config =
 	.nlp_flag = 2,
 	.aggr_mode = 1,
 	.fft_size = 256,	   //频域处理频点数
-	/* 80%/100%播放时20dB MIC固定增益会让扬声器回声削顶，产生无法被
-	 * AEC线性消除的残留。播放期使用官方建议的最小8dB MIC/REF增益差；
-	 * 播放结束后仍由原有ALC路径恢复正常拾音增益。 */
+	/* These are PGA gains only. The board separately keeps the MIC preamp
+	 * at 12 dB and the analog PA reference preamp at 0 dB. With the driver's
+	 * 1.5 dB PGA steps, playback totals are MIC 19.5 dB / REF 0 dB before
+	 * their unchanged digital gains. Ending AEC restores the original MIC
+	 * pickup gain; REF must not inherit either the MIC preamp or idle PGA. */
 	.alc_off_codec_adc_gain_mic = 8,
     .alc_off_codec_adc_gain_ref = 0,
 	.dtd_ratio = 1.0f,

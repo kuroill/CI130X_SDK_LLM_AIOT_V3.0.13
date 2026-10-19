@@ -445,13 +445,26 @@ const cm_codec_hw_info_t host_mic_hw_info =
 #endif
 #endif
     .codec_gain.codec_adc_mic_amp_l = INNER_CODEC_MIC_AMP_12dB,
+#if USE_AEC_MODULE && !IF_USE_ANOTHER_CODEC_TO_GET_REF && !MIC_RECORD_IIS_SELECT
+    /* Right ADC is the divided PA reference, not a second microphone.
+     * Field windows reached 56.6% full-scale samples with the 12 dB MIC
+     * preamp still enabled even though AEC's REF PGA was already 0 dB.
+     * Remove that analog boost before conversion; digital attenuation cannot
+     * restore a clipped reference. MIC sensitivity and DAC gain stay intact. */
+    .codec_gain.codec_adc_mic_amp_r = INNER_CODEC_MIC_AMP_0dB,
+    .codec_gain.pga_gain_r = 0.0f,
+#else
     .codec_gain.codec_adc_mic_amp_r = INNER_CODEC_MIC_AMP_12dB,
     #if AUTO_GET_AEC_GAIN
-    .codec_gain.pga_gain_l = 20.0f,
     .codec_gain.pga_gain_r = 0.0f,
     #else
-    .codec_gain.pga_gain_l = 28.5f,
     .codec_gain.pga_gain_r = 28.5f,
+    #endif
+#endif
+    #if AUTO_GET_AEC_GAIN
+    .codec_gain.pga_gain_l = 20.0f,
+    #else
+    .codec_gain.pga_gain_l = 28.5f,
     #endif
 #if (MIC_DIFF_SINGLE == 0)
     .codec_gain.dig_gain_l = 1.0f,

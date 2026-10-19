@@ -61,48 +61,59 @@ macOS 可运行实际 C 函数的主机模拟，不生成固件：
 python3 script/test_pa_idle_mute.py
 ```
 
-## 播放期滋滋声取证（2026-10-19）
+## REF 削顶、自回声与播放杂音（2026-10-19）
 
-本轮只增加 CI 诊断，不调整用户音量、提示音比例、DAC/MIC/REF 增益、IIS 时钟、
-DMA 容量、AEC 参数或播放期打断门槛。尚未证明杂音根因或声音已恢复正常。
+当前实现将实际板上右 ADC 的模拟 REF 前级从 12dB 改为 0dB，并将初始 REF
+PGA 固定为 0dB。该通道接的是经分压的功放输出，不能继续套用第二支麦克风的
+前级放大。修改仅限内部 ADC 右路为 REF 的拓扑；其他输入拓扑保留原设置。
+MIC 前级、播放/空闲 PGA、数字增益、用户音量、提示音比例、DAC、IIS、DMA、
+AEC 算法参数和真人打断策略保持原样。此修改尚未完成实机验证。
 
-最新同一次报时回复中，服务端 Opus 解码后按现有音量及淡入淡出处理的 PCM，
-与 ESP 和 CI 的 `nonzeroSamples=31731 nonzeroHash=d204c3ce peak=9056` 一致。
-这支持该段非零内容完整到达 DAC 队列，不能证明静音间隔、DMA 时序和模拟输出正确。
-CI 的 REF 同时出现多次 `refPeak=32768`、`refAbs` 接近满幅，需要查明削顶持续比例
-和实际生效的输入增益。两次提前停播由服务端 ASR partial 确认后发送 interrupt；
-同期 VAD 未检出语音，其中一段 partial 与回复内容相似，回声误识别尚待进一步验证。
-不以降低音量或关闭真人打断掩盖这些问题。
+本次 `esp-b4be67b2` 的证据：CI REF 满幅样本占比最高 56.6%，唤醒 ding 为
+31.6%；真实 `refPgaReg=0x6c` 表明 REF PGA 已是 0dB，但高位前级仍有 12dB。
+部分 MIC 窗口也有削顶，不能认定 REF 是所有回声的唯一来源。唤醒 ding 的
+`LOCAL_PCM clippedSamples=0`，所有已记录播放的 `resumedGaps=0`，未记录到
+DAC 中途切换零缓冲。两次提前停播分别由临时文字“本”“这是”触发服务端
+`[BARGE] source=partial reason=recognized_partial`，同期 VAD 无语音候选。
+后续 ASR final 中混入与天气回复近似的文字，并被对话历史再次引用；自回声是
+明确排查方向，不能把整段混合识别丢弃而误删后半句真人问题。
 
-Windows 按下节构建流程重建并刷入 CI；本轮无需更新 ESP 或 IoT。启动必须出现：
+之前同一报时回复中，服务端 Opus 解码后按现有音量及淡入淡出处理的 PCM，与
+ESP 和 CI 的 `nonzeroSamples=31731 nonzeroHash=d204c3ce peak=9056` 一致。
+这只支持非零内容完整到达 DAC 队列，不能证明模拟输出、时钟和声音干净。REF
+削顶足以破坏 AEC 参考的线性关系，但是否也造成扬声器滋滋声仍未证明；本轮先
+修已证实的输入余量问题，不以降低播放音量、过滤固定词或关闭真人打断处理。
+前级与 PGA 是两级独立模拟增益，不能用 ADC 后的数字衰减恢复已经削顶的波形。
+
+Windows 按下节流程完整重建两核并更新 CI；本轮无需更新 ESP 或 IoT。启动标记：
 
 ```text
-[AUDIO_DIAG] version=1 aec=windowed_task_logs dma=scheduled_blocks gain=unchanged
+[AUDIO_DIAG] version=2 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db
 ```
 
-保持当前 100% 音量，完整保存 ESP 和 CI 从启动到播放结束的日志。按顺序听启动
-内置播报、唤醒 ding、安静听一段长回复，最后再用真人插话检验打断和下一轮恢复。
-新增日志覆盖短 ding：首个有效窗口为 8 帧，之后每 64 帧汇总，结束时保留不足一窗
-的数据。每个窗口统计所有有效帧，而非只抽取最后一帧。
+保持 100% 音量，保存 ESP/CI 完整日志；先安静听启动内置播报和唤醒 ding，再问
+天气等长回复并听完，最后近距、远距、轻声真人插话，退出后再次唤醒并重复。
 
-| 日志与字段 | 预期和失败区分 |
+| 检查步骤 | 预期与异常区分 |
 | --- | --- |
-| `[LOCAL_PCM] peak/clippedSamples/gainRatioPercent` | 对照唤醒 ding 的实际衰减后 PCM。比例仍为 50%；可与 ESP 内置播报及对话的 `[CI_PCM]` 峰值比较，但峰值不代表声学响度。 |
-| `[AEC_PATH] playback/phase/frames/samples/aecFrames` | 同一播放的 `first/playing/end` 窗口。短音也应有记录；`aecFrames` 表示窗口内 AEC 工作帧数。 |
-| `micClipPermille/refClipPermille/dstClipPermille` | 16-bit 正负满幅样本占比，1000 表示全部样本达到边界。仅峰值到顶与长时间削顶由此区分；`micMean/refMean/dstMean` 辅助查看直流偏置。 |
-| `[AUDIO_GAIN]` | 与同 `playback/totalFrames` 窗口配对。记录窗口结束时真实 PGA 寄存器、ADC digital code、ALC 和 DAC code，不是配置文件的期望值。PGA 寄存器低 5 位是 PGA 档位、高位含前级增益；`pgaControlMask` 的 bit1/bit0 分别表示 MIC/REF 是否由 ALC 控制 PGA。 |
-| `[AUDIO_DMA] owner=local/downlink` | 每次播放停止后输出一次。`resumedGaps/resumedZeroBlocks` 只统计真实 PCM 缓冲之间插入驱动零缓冲、随后又恢复 PCM 的情况；正常连续供数应为 0。`startupZeroBlocks` 为首段 PCM 前的补零，`tailZeroBlocks` 为末段后的待定零尾，不直接判为断粮。`blockUs` 依据配置采样率计算，非时钟实测。 |
-| `droppedReports` | 诊断环形缓冲满时丢弃的报告数，区别于音频丢帧；非零说明日志消费者未及时读取。 |
-| ESP `reason=speech_recognized` / 服务端 `[BARGE] source=partial` | 表示 ASR 临时文字触发取消；对齐 partial 内容、音频时间范围、VAD 与 REF 削顶，不能当作网络断流或硬件自行停播。 |
+| 播放窗口的 `[AUDIO_GAIN]` | `refPgaReg=0x0c`，MIC 仍为 `0x71`，两路 ADC digital code 仍为 199，DAC 仍为 `31/255`。REF 仍为 `0x6c` 先检查构建、刷入镜像和实际配置；启动 version 标记不能代替寄存器核对。 |
+| `[AEC_PATH]` 覆盖 ding、长回复与结束尾音 | 目标是 `refClipPermille=0`，同时查看 `refPeak/refAbs` 是否仍过大、`micClipPermille` 是否仍有削顶和 `dstAbs/dstPeak` 的回声残留。0dB 生效仍持续削顶时，需要量 REF/MIC 引脚波形与功放输出；软件统计不能区分芯片输入过载和上游模拟失真。 |
+| 安静听完整短/长回复 | 不应出现自发 interrupt 或新用户轮次；正常结束有 `finish complete expectedNonzero=... receivedNonzero=...`。对齐双端 PCM 摘要；中断时因在途缓冲和主动清理，不要求两端摘要一致。 |
+| 真人插话、下一句、退出再唤醒 | 保留正常打断及完整识别，新回复正常播放；同看 `[BARGE] source/reason/evidence_end_ms/boundary_ms`、ESP `stop_requested` 和 CI 停播日志，区分真人、临时识别、硬件超时及自然结束。 |
+| 听感仍有滋滋声 | 若 PCM 一致、`resumedGaps=0` 且 REF 不再削顶，杂音仍独立存在，继续测 DAC/HPOUT、PA 供电、输出及实测时钟；不能宣布模拟链路已经修复。 |
 
-ADC/REF 和输出诊断使用有界静态存储，不申请音频堆缓冲。AEC 汇总由原心跳 task
-打印，音频/mailbox ISR 只累计和发布快照；DMA ISR 只更新计数。`AUDIO_DMA` 的证据
-是已调度的 DMA 地址，不是扬声器实际发声或电压测量。双端 PCM 一致且中间补零为 0
-仍有滋滋声时，应继续测 DAC/HPOUT、PA 供电及声学输出，不能继续归因于 Opus 断粮。
+已有诊断保留：`LOCAL_PCM` 为本地增益后样本；`AEC_PATH` 首窗 8 帧、其后每 64 帧
+汇总所有 MIC/REF/DST 有效样本，结束保留不足一窗的数据。`mic/ref/dstClipPermille`
+为 16bit 满幅样本比例，均值字段辅助观察直流；`AUDIO_GAIN` 是窗口结束的真实寄存器
+快照。`AUDIO_DMA startupZeroBlocks/tailZeroBlocks` 区分起止补零，`resumedGaps`
+仅统计 PCM 之间补零后又恢复 PCM 的情况，属于已调度 DMA 的证据。`droppedReports`
+是有界诊断环丢弃报告数，不是音频丢帧。打印仍在原心跳 task，音频/mailbox ISR
+只累计快照；没有新增音频堆缓冲、Task 或跨端接口。
 
-主机模拟与相关回归（不生成正式 CI 固件）：
+macOS 主机回归只检查实际 C 配置、寄存器写入和现有状态/队列路径，不生成正式固件：
 
 ```sh
+python3 script/test_aec_ref_headroom.py
 python3 script/test_audio_noise_diagnostics.py
 python3 script/test_iis_peer_recovery.py
 python3 script/test_pa_idle_mute.py
