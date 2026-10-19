@@ -36,23 +36,31 @@ https://www.chipintelli.com/zh-cn/page/151.html
 一次有界原始 REF 快照。每次播放跳过前八帧，在其后 REF 绝对值总和最大的
 一帧内，保存峰值附近连续 64 个原始样本；结束后由既有心跳 task 打印一次。
 音频/mailbox ISR 仅累计并拷贝固定快照，不打印、不分配堆内存、不增加 Task。
-该 4ms 片段可检查反馈波形有无平顶/不连续，不能证明整段没有高频底噪，也不能
+原始 MIC/REF 在重采样开启时为 32kHz，处理后的 DST/IIS 为 16kHz，不能混用。
+version=4 的 REF 日志曾将采样率写死为 16000；当前工程实际 32000，64 点仅约
+2ms，应按 32kHz 重新解释已有 hex。version=5 按原始 ADC 配置打印采样率；
+关闭重采样时才是 16kHz/4ms。此次只纠正诊断标注，不改变音频数据和播放行为。
+该片段可检查反馈波形有无平顶/不连续，不能证明整段没有高频底噪，也不能
 单独定位 HPOUT、PA 或供电；极短播放、报告队列满时可能没有快照。
 
-启动应为 `[AUDIO_DIAG] version=4 ... ref=peak_frame64`。Windows 按既有下节流程
-重建更新 CI；本轮无需改变 UART/I2S 契约或配置。以 50% 和 100% 分别唤醒，
+已有 version=4 日志可直接按当前实际 32kHz 重新分析，无需为标注修正单独刷机。
+后续 Windows 按既有下节流程重建更新 CI，启动应为
+`[AUDIO_DIAG] version=5 ... ref=peak_frame64 ref_rate=adc`，`REF_PCM` 应显示
+`sampleRate=32000`；本轮无需改变 UART/I2S 契约或配置。以 50% 和 100% 分别唤醒，
 安静听同内容短回复和长回复，再真人插话并开始下一句，最后退出后重新唤醒。
+此次元数据修正不应改变任何声音；日志采样率正确也不代表杂音已修复。
 
 | 观察 | 预期及失败区分 |
 | --- | --- |
-| `[REF_PCM]` | 每次有效播放结束最多一条；`playback` 对齐 AEC，`selectedFrame` 为采样帧号，`frameAbs` 为该帧 REF 绝对值总和，`samples=64 sampleRate=16000 encoding=s16le hex=...`。保留完整 hex（256 个十六进制字符），不要截断。 |
+| `[REF_PCM]` | 每次有效播放结束最多一条；`playback` 对齐 AEC，`selectedFrame` 为采样帧号，`frameAbs` 为该帧 REF 绝对值总和，`samples=64 sampleRate=32000 encoding=s16le hex=...`（当前重采样配置；关闭时 16000）。保留完整 hex（256 个十六进制字符），不要截断。 |
 | 完整自然播放 | `finish complete` 的计数与 ESP 一致；`resumedGaps=0`。一致只证明非零数字内容到达队列，仍需听感与 REF/输出波形。 |
 | 缺少快照 | 先看 version、`droppedReports`、播放是否超过八帧；不把缺日志当作静音或正常波形。 |
 | 提前停止/自言自语 | 同 turn 对照服务端 `[BARGE]`、ASR partial/final 与 ESP STOP；真人/唤醒打断仍应生效。主动中断摘要可不同，不当作丢包。 |
 | 音量差异/语言错误 | ESP 的实时音量与 IoT 的短句多语复核分别交付，见各自 README；本 CI 诊断不改变它们的行为。 |
 
 `python3 script/test_audio_noise_diagnostics.py` 使用实际 C 采集与打印函数，验证
-样本不变、ISR 不打印、原始十六进制编码、有界环以及整窗结束也能交付快照。
+样本不变、ISR 不打印、原始十六进制编码、有界环、16k/32k 原始采样率标注，
+以及整窗结束也能交付快照。
 主机检查不等于 Windows 正式固件构建或音质验收；持续杂音仍待下一轮实机取证。
 
 ## 播放开关杂音与 HPOUT 所有权（2026-10-19）

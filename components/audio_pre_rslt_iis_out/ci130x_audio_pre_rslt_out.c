@@ -683,6 +683,9 @@ void audio_debug_uart0_upload(int16_t *left, int16_t *right, ci_wrapfft_audio *p
 #define AEC_PATH_FIRST_WINDOW_FRAMES 8U
 #define AEC_PATH_WINDOW_FRAMES 64U
 #define AEC_REF_SNAPSHOT_SAMPLES 64U
+/* REF is copied before STFT downsampling: the raw ADC runs at 32 kHz when
+ * resampling is enabled, while processed DST/IIS output remains 16 kHz. */
+#define AEC_REF_SAMPLE_RATE_HZ (INNER_CODEC_AUDIO_IN_USE_RESAMPLE ? 32000U : 16000U)
 typedef struct
 {
     uint32_t frames;
@@ -896,9 +899,10 @@ void audio_pre_rslt_report_diagnostics(void)
             hex[i * 4U + 3U] = digits[(value >> 8) & 15U];
         }
         hex[report.ref_samples * 4U] = 0;
-        mprintf("[REF_PCM] playback=%lu selectedFrame=%lu frameAbs=%lu samples=%lu sampleRate=16000 encoding=s16le hex=%s\r\n",
+        mprintf("[REF_PCM] playback=%lu selectedFrame=%lu frameAbs=%lu samples=%lu sampleRate=%lu encoding=s16le hex=%s\r\n",
             (unsigned long)report.playback, (unsigned long)report.ref_frame,
-            (unsigned long)report.ref_abs, (unsigned long)report.ref_samples, hex);
+            (unsigned long)report.ref_abs, (unsigned long)report.ref_samples,
+            (unsigned long)AEC_REF_SAMPLE_RATE_HZ, hex);
     }
 }
 

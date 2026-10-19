@@ -50,8 +50,8 @@ static void clear_output(void) { output_size=0; output_lines=0; output[0]=0; }
 '''
 
 
-def aec_fixture():
-    source = COMMON + r'''
+def aec_fixture(resample):
+    source = COMMON + f"\n#define INNER_CODEC_AUDIO_IN_USE_RESAMPLE {resample}\n" + r'''
 enum { CI_SS_PLAY_STATE, CI_SS_AEC_WORK_STATE, CI_SS_PLAY_STATE_PLAYING=7 };
 static int playing, aec_working;
 static unsigned ciss_get(int key) { return key==CI_SS_PLAY_STATE ? playing : aec_working; }
@@ -155,6 +155,11 @@ int main(void) {
     end_playback(); drain();
     assert(strstr(output,"[REF_PCM] playback="));
     assert(strstr(output,"selectedFrame=9 frameAbs=298240 samples=64"));
+#if INNER_CODEC_AUDIO_IN_USE_RESAMPLE
+    assert(strstr(output,"samples=64 sampleRate=32000 encoding=s16le"));
+#else
+    assert(strstr(output,"samples=64 sampleRate=16000 encoding=s16le"));
+#endif
     assert(strstr(output,"encoding=s16le hex=341234123412"));
     for(int i=0;i<66;++i) assert(snapshot_ref[i]==0x1234);
     /* Exact window completion still delivers REF once, without zero-sample divisions. */
@@ -257,7 +262,8 @@ def main():
     assert "mprintf" not in collector and "printf" not in function(UPLINK, "queue_aec_path_report")
     assert "audio_pre_rslt_report_diagnostics();" in function(UART, "heartbeat_task")
     assert "cm_report_output_diagnostics" not in function(CODEC, "cm_output_interrupt_handler")
-    run_fixture("aec_path_diagnostics", aec_fixture())
+    for resample in (0, 1):
+        run_fixture(f"aec_path_diagnostics_resample_{resample}", aec_fixture(resample))
     run_fixture("dma_output_diagnostics", dma_fixture())
     run_fixture("local_pcm_diagnostics", local_pcm_fixture())
 
