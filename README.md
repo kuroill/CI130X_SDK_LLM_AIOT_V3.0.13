@@ -25,37 +25,46 @@ https://www.chipintelli.com/zh-cn/page/151.html
 
 编译环境安装说明、芯片手册、开发板资料等，详见启英泰伦语音AI平台网址：https://aiplatform.chipintelli.com
 
-## 空闲功放静音验证
+## 播放开关杂音与 HPOUT 所有权（2026-10-19）
 
-针对“唤醒后未说话时喇叭持续有噪音”，当前实现将本地播放器和 ESP 下行的
-`PLAYER_CONTROL_PA` 设为 1：空闲关闭功放，起播先静音 HPOUT、开启 PA、等待
-SDK 原有的 100ms 稳定时间，再恢复 HPOUT；结束先静音 HPOUT 再关闭 PA。
-DAC 保持上电，连续 ADC、AEC 尾音与真人打断保留；DAC/MIC/REF 增益、用户音量
-及提示音 50% 比例不变。PA 状态收口在音频硬件控制函数内，组合提示音复用已开启
-的 PA；不再引用当前旧 Wi-Fi 运行结构体中不存在的 `pa_start_flag`。
+最新 `esp-d262925d` 的 REF 前级修正已生效：`refPgaReg=0x0c`，报告窗口的
+`refClipPermille=0`，下行摘要一致、FINISH 完整；这没有解决用户反馈的杂音。
+用户进一步确认：滋滋声只在起播/结束时出现，平时安静。该现象应继续按输出
+切换瞬态排查，不能再将 REF 削顶与扬声器杂音当作同一个已证实根因。
 
-自然 FINISH 仍等待 DAC 队列排空后关 PA；中断、超时和 peer 清理通过原下行
-owner 关闭，重复 STOP 不得误关已接管扬声器的本地提示音。每次从空闲起播增加
-约 100ms 准备时间。ESP 的 START 专用 ACK/调用预算配套为 600/1500ms，以覆盖
-250ms 本地播放器交接、100ms PA 稳定等待及一次重试；其他命令预算不变。
-先由用户更新 ESP，再在 Windows 按下一节完整重建并更新 CI。无需修改 IoT 或协议。
+原实现先开 PA、再开 HPOUT；结束先关 HPOUT、再关 PA，codec 的 DMA 生命周期
+回调还会额外切 HPOUT。本轮将主动 PA 控制模式的 HPOUT 操作收口到
+`audio_play_hw_pa_da_ctl`：板级不再给通用 DMA start/stop 注册 HPOUT 回调，
+只移除重复的模拟输出副作用，保留 DMA/时钟/缓冲启动停止本身。该变更仅用于
+`SIMPLE_AUDIO_PLAYER_ENABLE && PLAYER_CONTROL_PA`，其他播放器路径保持原路由。
 
-实现与主机静态验证完成，尚未证明现场噪音消除。保持原音量，在单台测试机验证：
+起播先确认 PA 关闭，应用原增益、开启 HPOUT，等待 20ms，再开 PA 并保留原
+100ms 稳定等待；结束先关 PA，等待 20ms，再关 HPOUT。下行在关输出后才停 DAC
+DMA；自然 FINISH 仍先等待音频播完。组合提示音保持 PA/HPOUT 开启，换段不
+重写 DAC 增益，避免第一段 PCM 开始后将 digital code 从 235 再写回 255。
+实际输出增益、用户音量、提示音比例、MIC/REF/AEC 参数及真人打断均不变。
+20ms 是待实机核验的输出稳定时间，不能视为已测定电容或功放的真实稳定时间。
+每次冷起播和关闭分别新增约 20ms；ESP 现有 START 600/1500ms 预算保持原样。
 
-| 步骤 | 预期行为和关键日志 |
+本轮 Windows 按下方流程完整重建 CI；ESP 无需重编。启动和播放日志应包含：
+
+```text
+[AUDIO_DIAG] version=3 ... gain=ref_frontend_0db output=pa_guarded_hpout
+[AUDIO_OUT] phase=active hpoutMuted=0 ... switchOrder=hpout_then_pa elapsedMs=...
+[AUDIO_OUT] phase=idle hpoutMuted=1 ... switchOrder=pa_then_hpout elapsedMs=...
+```
+
+| 实机步骤 | 预期与失败区分 |
 | --- | --- |
-| 启动，唤醒后安静等待，再观察返回待唤醒 | 唤醒 ding 正常；ding 结束附近出现 `[AUDIO_PA] requested=off ... enabled=0` 和 `[AUDIO_OUT] phase=idle hpoutMuted=1 paControl=1`，持续监听时无底噪。PA 控制线原有有效电平检测保留，不写死高低电平。 |
-| 短回复、长回复各听完整三次 | 起播有 `requested=on ... enabled=1`、`phase=active hpoutMuted=0`；首尾字完整，结束有 `[DOWNLINK] stopped ... pa=off`、`finish complete`，ESP 为 `graceful=true`。正常同步音量后 DAC 寄存器应保持 `dacAnalogCode=31 dacDigitalCode=255`。 |
-| 播放中真人插话，再说下一句；退出后重新唤醒，重复十轮 | 能打断并继续对话，旧 STOP 不切掉下一段 ding/回复；无需重新上电恢复，不能以静音为代价丢失采音。 |
-| 先在空闲、再在播放期单独重启 ESP | CI 原 peer 清理及上行恢复日志继续出现；停止后 PA 关闭，ESP 恢复后可以再次唤醒和完整播放。 |
+| 100% 音量听内置提示、短 ding、短/长回复各三次 | 首尾完整、开关时无滋滋声；冷起播 `elapsedMs` 通常至少约 120ms，关闭至少约 20ms；组合换段不重复 PA 边沿。日志是软件顺序，声学效果仍需听感/示波器确认。 |
+| 听完后安静等待 | PA 关闭、HPOUT 静音，持续上行采音；没有为了降噪停止 ADC/AEC。自然结束有 `finish complete`，双端 PCM 摘要一致。 |
+| 播放中真人/唤醒词打断，再说下一句、退出后重唤醒 | 原 owner 执行一次 STOP；重复 STOP 不关掉新的 ding，下一轮能正常播放。主动中断不要求双端摘要一致。 |
+| 空闲/播放中单独重启 ESP | peer 清理后 PA 关闭，时钟恢复后上行和下一次播放正常，不需要 CI 重新上电。 |
+| `version=3` 与正确 `switchOrder` 下仍有开关杂音 | 测 PA 控制脚、HPOUT、PA 输入耦合及供电瞬态；若 `pcm_timeout`/双端摘要不同，仍按数字链路错误单独排查，不继续盲调增益。 |
 
-噪音仍在时，对齐完整 ESP/CI 日志：缺少上述关闭日志先查固件版本与退出路径；
-`hpoutMuted=0` 或 `enabled=1` 表示输出仍开启；两者均显示关闭仍有噪音，需要
-实测 PA MUTE 引脚和模拟输出。`gpioLevel` 是 GPIO 数据寄存器读值，并非实际电压
-或声学验证。只在开关瞬间出现“啪”声，需单独核对 PA/HPOUT 时序；`pcm_timeout`
-或双端 `[CI_PCM]` 不一致仍按数字链路问题排查；不降低对话音量掩盖问题。
-
-macOS 可运行实际 C 函数的主机模拟，不生成固件：
+主机模拟使用真实硬件控制函数和板级回调表，直接断言每次 HPOUT 位变化均发生
+在 PA 关闭时，覆盖双有效电平、400 次自然结束、组合换段、重复 STOP、超时与
+失败清理；它不证明模拟电压或实际音质正常：
 
 ```sh
 python3 script/test_pa_idle_mute.py
@@ -67,7 +76,7 @@ python3 script/test_pa_idle_mute.py
 PGA 固定为 0dB。该通道接的是经分压的功放输出，不能继续套用第二支麦克风的
 前级放大。修改仅限内部 ADC 右路为 REF 的拓扑；其他输入拓扑保留原设置。
 MIC 前级、播放/空闲 PGA、数字增益、用户音量、提示音比例、DAC、IIS、DMA、
-AEC 算法参数和真人打断策略保持原样。此修改尚未完成实机验证。
+AEC 算法参数和真人打断策略保持原样。新日志已验证该设置生效，报告窗口不再出现此前持续的 REF 满幅；不代表所有模拟失真已消除。
 
 本次 `esp-b4be67b2` 的证据：CI REF 满幅样本占比最高 56.6%，唤醒 ding 为
 31.6%；真实 `refPgaReg=0x6c` 表明 REF PGA 已是 0dB，但高位前级仍有 12dB。
@@ -85,10 +94,11 @@ ESP 和 CI 的 `nonzeroSamples=31731 nonzeroHash=d204c3ce peak=9056` 一致。
 修已证实的输入余量问题，不以降低播放音量、过滤固定词或关闭真人打断处理。
 前级与 PGA 是两级独立模拟增益，不能用 ADC 后的数字衰减恢复已经削顶的波形。
 
-Windows 按下节流程完整重建两核并更新 CI；本轮无需更新 ESP 或 IoT。启动标记：
+REF 修正的实机寄存器为 `0x0c`。当前输出时序版本需按下节重建两核；
+会话误退出的 IoT 修正另需用户部署服务，UART/I2S 协议不变。当前启动标记：
 
 ```text
-[AUDIO_DIAG] version=2 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db
+[AUDIO_DIAG] version=3 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db output=pa_guarded_hpout
 ```
 
 保持 100% 音量，保存 ESP/CI 完整日志；先安静听启动内置播报和唤醒 ding，再问

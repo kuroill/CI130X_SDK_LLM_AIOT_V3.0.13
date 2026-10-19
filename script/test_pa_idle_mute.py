@@ -53,7 +53,9 @@ static void mprintf(const char *format, ...) { (void)format; }
 #define portMAX_DELAY 0xffffffffU
 #define pdTRUE 1
 #define PLAYER_CONTROL_PA 1
+#define SIMPLE_AUDIO_PLAYER_ENABLE 1
 #define IF_JUST_CLOSE_HPOUT_WHILE_NO_PLAY 1
+#define portTICK_PERIOD_MS 1
 typedef unsigned TickType_t;
 typedef enum { DISABLE, ENABLE } FunctionalState;
 typedef enum { CODEC_INPUT, CODEC_OUTPUT } io_direction_t;
@@ -67,6 +69,7 @@ static int input_muted, play_state, local_state, stop_requested, local_stop_ok;
 static int gain_applications, state_reports, codec_stops, downlink_mutex;
 static int held, busy_buffers, busy_stuck, downlink_starting;
 static TickType_t now;
+static TickType_t hpout_opened_at, pa_disabled_at;
 static uint8_t downlink_enabled, downlink_codec_started, i2s_rx_ready;
 static uint32_t downlink_bytes, downlink_nonzero_samples;
 static uint8_t downlink_play_buffer[2048];
@@ -78,8 +81,13 @@ typedef struct { unsigned sample_rate, channel_flag, sample_depth; } cm_sound_in
 static int pa_enabled(void) { return gpio_level == g_pa_pin_valid_level; }
 static int hpout_muted(void) { return (CODEC->reg2b & 4U) == 0; }
 static void gpio_set_level(int level) {
-    /* Both rising and falling PA edges must occur behind muted HPOUT. */
-    assert(hpout_muted());
+    /* HPOUT and its gain must be settled before the PA becomes audible. */
+    if (level == g_pa_pin_valid_level) {
+        assert(!hpout_muted() && gain_applications > 0);
+        assert(now - hpout_opened_at >= AUDIO_PLAY_HPOUT_SETTLE_MS);
+    } else {
+        pa_disabled_at = now;
+    }
     if (downlink_starting) assert(input_muted);
     gpio_level = level;
     ++pa_writes;
@@ -91,12 +99,14 @@ static void inner_codec_dac_enable(bool first) { assert(!"AEC DAC power changed"
 static void inner_codec_dac_disable(void) { assert(!"AEC DAC power changed"); }
 static void vTaskDelay(TickType_t delay) {
     if (delay == AUDIO_PLAY_PA_SETTLE_MS) {
-        assert(pa_enabled() && hpout_muted());
+        assert(pa_enabled() && !hpout_muted());
         if (downlink_starting) {
             assert(input_muted && play_state == CI_SS_PLAY_STATE_PLAYING);
             assert(!downlink_enabled);
         }
         ++settle_delays;
+    } else if (delay == AUDIO_PLAY_HPOUT_SETTLE_MS) {
+        assert(!pa_enabled());
     }
     now += delay;
 }
@@ -126,7 +136,8 @@ static void cm_config_codec(int index, int dir, cm_sound_info_t *info) {
     assert(info->sample_depth == IIS_DW_16BIT);
 }
 static void audio_play_apply_output_gain(void) {
-    assert(input_muted && !pa_enabled());
+    assert(!pa_enabled());
+    if (downlink_starting) assert(input_muted);
     ++gain_applications;
 }
 static void send_state(int state) {
@@ -155,6 +166,7 @@ static void resume_asr(void) { }
     constants = ""
     for text, name in (
         (PLAYER, "AUDIO_PLAY_PA_SETTLE_MS"),
+        (PLAYER, "AUDIO_PLAY_HPOUT_SETTLE_MS"),
         (UART, "AI_PLAY_STOP_WAIT_MS"),
         (UART, "AI_DOWNLINK_PCM_BUFFER_COUNT"),
         (UART, "AI_DOWNLINK_FINISH_TIMEOUT_MS"),
@@ -166,8 +178,22 @@ static void resume_asr(void) { }
     pa_type = re.search(r"typedef enum\s*\{[^}]*\}\s*audio_pa_state_t;", PLAYER)
     assert pa_type
     source += pa_type.group() + "\nstatic audio_pa_state_t audio_pa_state;\n"
+    # Observe real HPOUT bit changes; an accidental codec callback while PA is
+    # enabled must fail this fixture, even if the high-level order looks right.
+    source += function(CODEC, "inner_codec_hpout_is_mute").replace(
+        "inner_codec_hpout_is_mute", "raw_hpout_mute", 1
+    )
+    source += r'''
+static void inner_codec_hpout_is_mute(bool en) {
+    if (en != hpout_muted()) {
+        assert(!pa_enabled());
+        if (en && pa_writes) assert(now - pa_disabled_at >= AUDIO_PLAY_HPOUT_SETTLE_MS);
+        if (!en) hpout_opened_at = now;
+    }
+    raw_hpout_mute(en);
+}
+'''
     for text, name in (
-        (CODEC, "inner_codec_hpout_is_mute"),
         (CODEC, "icodec_start"),
         (CODEC, "icodec_stop"),
         (BOARD, "power_amplifier_on"),
@@ -175,16 +201,22 @@ static void resume_asr(void) { }
         (PLAYER, "audio_play_hw_pa_da_ctl"),
     ):
         source += function(text, name)
+    callbacks = re.search(r"\.codec_if\s*=\s*(\{.*?\})", BOARD, re.S)
+    assert callbacks
+    initializer = re.sub(
+        r"(?m)^\s*\.codec_(?:init|config|ioctl)\s*=[^\n]*\n", "", callbacks[1]
+    )
+    source += "static struct { int (*codec_start)(io_direction_t); int (*codec_stop)(io_direction_t); } board_callbacks = " + initializer + ";\n"
     source += r'''
 static int cm_start_codec(int index, io_direction_t dir) {
     assert(held && input_muted);
-    return icodec_start(dir);
+    return board_callbacks.codec_start ? board_callbacks.codec_start(dir) : 0;
 }
 static int cm_stop_codec(int index, io_direction_t dir) {
     assert(held && input_muted);
     ++codec_stops;
     busy_buffers = 0;
-    return icodec_stop(dir);
+    return board_callbacks.codec_stop ? board_callbacks.codec_stop(dir) : 0;
 }
 '''
     for text, name in (
@@ -209,6 +241,7 @@ static void reset(int active_level) {
     i2s_rx_ready = 1;
     play_state = 0;
     now = 0;
+    hpout_opened_at = pa_disabled_at = 0;
 }
 static void assert_gain_and_capture_unchanged(void) {
     assert(codec.reg2d == 31 && codec.reg6 == 255);
@@ -253,7 +286,8 @@ static void test_polarity(int active_level) {
     audio_play_hw_pa_da_ctl(ENABLE, true);
     int writes = pa_writes, stops = codec_stops;
     int delays = settle_delays;
-    icodec_stop(CODEC_OUTPUT); /* Local combination between two segments. */
+    /* The real board callbacks must not switch HPOUT between local segments. */
+    if (board_callbacks.codec_stop) board_callbacks.codec_stop(CODEC_OUTPUT);
     audio_play_hw_pa_da_ctl(ENABLE, true);
     assert(pa_enabled() && !hpout_muted());
     assert(pa_writes == writes && settle_delays == delays);
@@ -290,10 +324,11 @@ static void test_failures(void) {
     assert_gain_and_capture_unchanged();
 }
 int main(void) {
+    assert(!board_callbacks.codec_start && !board_callbacks.codec_stop);
     test_polarity(0);
     test_polarity(1);
     test_failures();
-    puts("PA idle mute: both polarities, muted switching/settling, unchanged gain/capture, 400 finish cycles, duplicate START/STOP isolation and timeout cleanup passed");
+    puts("PA boundaries: both polarities, HPOUT transitions behind disabled PA, settled input/gain before PA on, real callback routing, 400 finish cycles, duplicate STOP isolation and timeout cleanup passed");
 }
 '''
     run_fixture("pa_idle_mute", source)

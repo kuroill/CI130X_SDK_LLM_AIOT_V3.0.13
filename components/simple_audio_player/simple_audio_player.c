@@ -32,6 +32,8 @@
 #define SAP_PCM_BUF_COUNT 4
 /* Keep the SDK local-player PA settling time for both playback paths. */
 #define AUDIO_PLAY_PA_SETTLE_MS 100U
+/* Allow the HPOUT/coupling network to settle behind the disabled PA. */
+#define AUDIO_PLAY_HPOUT_SETTLE_MS 20U
 SemaphoreHandle_t fetch_sem =NULL;
 extern CiasAiotFuncParamTypedef gCiasAiotFuncParam;
 extern CiasAiotRunParamTypedef gCiasAiotRunParam;
@@ -298,34 +300,52 @@ static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
  */
 void audio_play_hw_pa_da_ctl(FunctionalState cmd, bool is_control_pa)
 {
-    /* Switch the PA only while HPOUT is muted. With AEC enabled, icodec_stop
-     * closes HPOUT without powering down the DAC or interrupting ADC capture. */
+    TickType_t started = xTaskGetTickCount();
+    /* HPOUT transitions belong behind a disabled PA. The board omits the
+     * codec start/stop callbacks in this mode, so DMA cannot undo this order. */
     if (ENABLE == cmd)
     {
-        if (is_control_pa && (audio_pa_state != AUDIO_PA_STATE_ON))
+        if (is_control_pa)
         {
-            icodec_stop(CODEC_OUTPUT);
-            power_amplifier_on();
-            vTaskDelay(pdMS_TO_TICKS(AUDIO_PLAY_PA_SETTLE_MS));
-            audio_pa_state = AUDIO_PA_STATE_ON;
+            if (audio_pa_state != AUDIO_PA_STATE_ON)
+            {
+                if (audio_pa_state != AUDIO_PA_STATE_OFF)
+                {
+                    power_amplifier_off();
+                    audio_pa_state = AUDIO_PA_STATE_OFF;
+                }
+                audio_play_apply_output_gain();
+                icodec_start(CODEC_OUTPUT);
+                vTaskDelay(pdMS_TO_TICKS(AUDIO_PLAY_HPOUT_SETTLE_MS));
+                power_amplifier_on();
+                vTaskDelay(pdMS_TO_TICKS(AUDIO_PLAY_PA_SETTLE_MS));
+                audio_pa_state = AUDIO_PA_STATE_ON;
+            }
         }
-        icodec_start(CODEC_OUTPUT);
+        else
+        {
+            audio_play_apply_output_gain();
+            icodec_start(CODEC_OUTPUT);
+        }
     }
     else
     {
-        icodec_stop(CODEC_OUTPUT);
         if (is_control_pa && (audio_pa_state != AUDIO_PA_STATE_OFF))
         {
             power_amplifier_off();
             audio_pa_state = AUDIO_PA_STATE_OFF;
+            vTaskDelay(pdMS_TO_TICKS(AUDIO_PLAY_HPOUT_SETTLE_MS));
         }
+        icodec_stop(CODEC_OUTPUT);
     }
-    mprintf("[AUDIO_OUT] phase=%s hpoutMuted=%u paControl=%u dacAnalogCode=%u dacDigitalCode=%u\r\n",
+    mprintf("[AUDIO_OUT] phase=%s hpoutMuted=%u paControl=%u dacAnalogCode=%u dacDigitalCode=%u switchOrder=%s elapsedMs=%lu\r\n",
         (ENABLE == cmd) ? "active" : "idle",
         (unsigned int)((CODEC->reg2b & (1U << 2)) == 0),
         (unsigned int)is_control_pa,
         (unsigned int)(CODEC->reg2d & 0x1fU),
-        (unsigned int)(CODEC->reg6 & 0xffU));
+        (unsigned int)(CODEC->reg6 & 0xffU),
+        is_control_pa ? ((ENABLE == cmd) ? "hpout_then_pa" : "pa_then_hpout") : "hpout_only",
+        (unsigned long)((xTaskGetTickCount() - started) * portTICK_PERIOD_MS));
 }
 
 static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken)
@@ -713,7 +733,6 @@ static int sap_decode_one_frame(void)
         {
             cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
             cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
-            audio_play_apply_output_gain();
         }
         ret = 1;
     }

@@ -227,12 +227,12 @@ static void stop_downlink(void)
     if(downlink_codec_started)
     {
         cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
-        cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
 #if PLAYER_CONTROL_PA
-        /* Only the active downlink owner may close the PA. A duplicate STOP
-         * must not mute a later local prompt which now owns the speaker. */
+        /* Close the active owner's PA before HPOUT or the DAC clock changes.
+         * A duplicate STOP must not mute a later local prompt. */
         audio_play_hw_pa_da_ctl(DISABLE, true);
 #endif
+        cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
         /* Let the AEC owner drain the acoustic/reference tail and restore ALC.
          * Writing IDLE directly bypasses that cleanup and can leak the speaker
          * tail into the next uplink while CI_SS_AEC_WORK_STATE stays stale. */
@@ -456,7 +456,6 @@ static uint8_t start_downlink(void)
      * runtime gain before opening HPOUT and accepting ESP audio. */
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
     cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
-    audio_play_apply_output_gain();
     audio_play_hw_pa_da_ctl(ENABLE, true);
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
     downlink_enabled = 1;
@@ -857,7 +856,7 @@ static void heartbeat_task(void *arg)
 
 void ai_uart_i2s_protocol_init(void)
 {
-    mprintf("[AUDIO_DIAG] version=2 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db\r\n");
+    mprintf("[AUDIO_DIAG] version=3 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db output=pa_guarded_hpout\r\n");
     BaseType_t task_created;
     send_mutex = xSemaphoreCreateMutex();
     downlink_mutex = xSemaphoreCreateMutex();

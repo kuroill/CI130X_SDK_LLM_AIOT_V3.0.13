@@ -486,8 +486,15 @@ const cm_codec_hw_info_t host_mic_hw_info =
     {
         .codec_init = icodec_init,
         .codec_config = icodec_config,
+#if SIMPLE_AUDIO_PLAYER_ENABLE && PLAYER_CONTROL_PA
+        /* The shared playback hardware executor owns HPOUT with the PA.
+         * Starting/stopping DMA must not switch HPOUT behind that owner. */
+        .codec_start = NULL,
+        .codec_stop = NULL,
+#else
         .codec_start = icodec_start,
         .codec_stop = icodec_stop,
+#endif
         .codec_ioctl = icodec_ioctl,
     }
 #endif
