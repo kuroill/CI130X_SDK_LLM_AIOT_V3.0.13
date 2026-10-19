@@ -25,12 +25,42 @@ https://www.chipintelli.com/zh-cn/page/151.html
 
 编译环境安装说明、芯片手册、开发板资料等，详见启英泰伦语音AI平台网址：https://aiplatform.chipintelli.com
 
+## 持续播放杂音：REF 原始波形取证（2026-10-19）
+
+最新用户确认：滋滋声伴随唤醒 ding 和整段回复，空闲没有；此前“只在首尾”
+的描述已被更正。当前 `refPgaReg=0x0c`、窗口削顶报告 0‰、双端 PCM 摘要
+一致、`resumedGaps=0`，正确 PA/HPOUT 顺序仍有杂音。因此不能再用延长开关
+等待或调整模拟增益猜修；0‰ 是取整统计，也不等于所有采样及模拟输出无失真。
+
+本轮保持实际 PCM、IIS/DMA、输出增益、MIC/REF/AEC 及播放 owner 不变，只增加
+一次有界原始 REF 快照。每次播放跳过前八帧，在其后 REF 绝对值总和最大的
+一帧内，保存峰值附近连续 64 个原始样本；结束后由既有心跳 task 打印一次。
+音频/mailbox ISR 仅累计并拷贝固定快照，不打印、不分配堆内存、不增加 Task。
+该 4ms 片段可检查反馈波形有无平顶/不连续，不能证明整段没有高频底噪，也不能
+单独定位 HPOUT、PA 或供电；极短播放、报告队列满时可能没有快照。
+
+启动应为 `[AUDIO_DIAG] version=4 ... ref=peak_frame64`。Windows 按既有下节流程
+重建更新 CI；本轮无需改变 UART/I2S 契约或配置。以 50% 和 100% 分别唤醒，
+安静听同内容短回复和长回复，再真人插话并开始下一句，最后退出后重新唤醒。
+
+| 观察 | 预期及失败区分 |
+| --- | --- |
+| `[REF_PCM]` | 每次有效播放结束最多一条；`playback` 对齐 AEC，`selectedFrame` 为采样帧号，`frameAbs` 为该帧 REF 绝对值总和，`samples=64 sampleRate=16000 encoding=s16le hex=...`。保留完整 hex（256 个十六进制字符），不要截断。 |
+| 完整自然播放 | `finish complete` 的计数与 ESP 一致；`resumedGaps=0`。一致只证明非零数字内容到达队列，仍需听感与 REF/输出波形。 |
+| 缺少快照 | 先看 version、`droppedReports`、播放是否超过八帧；不把缺日志当作静音或正常波形。 |
+| 提前停止/自言自语 | 同 turn 对照服务端 `[BARGE]`、ASR partial/final 与 ESP STOP；真人/唤醒打断仍应生效。主动中断摘要可不同，不当作丢包。 |
+| 音量差异/语言错误 | ESP 的实时音量与 IoT 的短句多语复核分别交付，见各自 README；本 CI 诊断不改变它们的行为。 |
+
+`python3 script/test_audio_noise_diagnostics.py` 使用实际 C 采集与打印函数，验证
+样本不变、ISR 不打印、原始十六进制编码、有界环以及整窗结束也能交付快照。
+主机检查不等于 Windows 正式固件构建或音质验收；持续杂音仍待下一轮实机取证。
+
 ## 播放开关杂音与 HPOUT 所有权（2026-10-19）
 
 最新 `esp-d262925d` 的 REF 前级修正已生效：`refPgaReg=0x0c`，报告窗口的
 `refClipPermille=0`，下行摘要一致、FINISH 完整；这没有解决用户反馈的杂音。
-用户进一步确认：滋滋声只在起播/结束时出现，平时安静。该现象应继续按输出
-切换瞬态排查，不能再将 REF 削顶与扬声器杂音当作同一个已证实根因。
+上一轮曾描述为首尾杂音；最新确认见上节，播报中间也持续伴随。输出切换
+时序修正未解决杂音，不能再将 REF 削顶与扬声器杂音当作同一个已证实根因。
 
 原实现先开 PA、再开 HPOUT；结束先关 HPOUT、再关 PA，codec 的 DMA 生命周期
 回调还会额外切 HPOUT。本轮将主动 PA 控制模式的 HPOUT 操作收口到

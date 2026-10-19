@@ -144,7 +144,29 @@ int main(void) {
     drain(); assert(strstr(output,"droppedReports=1"));
     assert(codec.reg2d==31 && codec.reg6==255 && codec.pga_gain_reg[1]==0x7f);
     assert(!memcmp(saved_mic,mic,sizeof mic) && !memcmp(saved_dst,dst,sizeof dst));
-    puts("AEC diagnostics: complete windows, transient/short ding, clip/DC counts, immutable PCM/register snapshots, bounded ring and task-only printing passed");
+    /* Capture original PA feedback without writing samples or printing in ISR. */
+    clear_output(); playing=CI_SS_PLAY_STATE_PLAYING;
+    for(int i=0;i<8;++i) collect(&quiet);
+    int16_t snapshot_mic[64]={0},snapshot_ref[66],snapshot_dst[64]={0};
+    for(int i=0;i<66;++i) snapshot_ref[i]=0x1234;
+    ci_wrapfft_audio snapshot={{snapshot_mic},{snapshot_ref+1},{snapshot_dst}};
+    in_isr=1; report_aec_path_levels(&snapshot,64); in_isr=0;
+    assert(aec_ref_samples==64 && aec_ref_frame==9 && !output_lines);
+    end_playback(); drain();
+    assert(strstr(output,"[REF_PCM] playback="));
+    assert(strstr(output,"selectedFrame=9 frameAbs=298240 samples=64"));
+    assert(strstr(output,"encoding=s16le hex=341234123412"));
+    for(int i=0;i<66;++i) assert(snapshot_ref[i]==0x1234);
+    /* Exact window completion still delivers REF once, without zero-sample divisions. */
+    clear_output(); playing=CI_SS_PLAY_STATE_PLAYING;
+    for(int i=0;i<8;++i) collect(&quiet);
+    in_isr=1;
+    for(int i=0;i<64;++i) report_aec_path_levels(&snapshot,64);
+    in_isr=0;
+    end_playback(); drain();
+    assert(strstr(output,"[REF_PCM] playback="));
+    assert(!strstr(output,"phase=end frames=0"));
+    puts("AEC diagnostics: complete windows, transient/short ding, clip/DC counts, original bounded REF waveform, immutable PCM/register snapshots and task-only printing passed");
 }
 '''
     return source

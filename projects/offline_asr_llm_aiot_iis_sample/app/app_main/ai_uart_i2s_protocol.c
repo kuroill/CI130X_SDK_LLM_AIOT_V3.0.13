@@ -856,7 +856,7 @@ static void heartbeat_task(void *arg)
 
 void ai_uart_i2s_protocol_init(void)
 {
-    mprintf("[AUDIO_DIAG] version=3 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db output=pa_guarded_hpout\r\n");
+    mprintf("[AUDIO_DIAG] version=4 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db output=pa_guarded_hpout ref=peak_frame64\r\n");
     BaseType_t task_created;
     send_mutex = xSemaphoreCreateMutex();
     downlink_mutex = xSemaphoreCreateMutex();
