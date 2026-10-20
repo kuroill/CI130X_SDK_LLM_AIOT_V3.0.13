@@ -21,7 +21,8 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd);
 /* Only the existing system-message owner executes link-loss side effects. */
 void ai_uart_i2s_handle_timeout(void);
 bool ai_uart_i2s_conversation_active(void);
-void ai_uart_i2s_on_wake(uint16_t wake_id);
+bool ai_uart_i2s_wake_prompt_quiet(void);
+void ai_uart_i2s_on_wake(uint16_t wake_id, bool quiet);
 void ai_uart_i2s_on_ding_done(void);
 
 #endif

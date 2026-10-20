@@ -76,6 +76,16 @@ static volatile uint8_t timeout_event_queued;
 static volatile uint8_t current_state = AI_UART_STATE_WAKEUP_WAIT;
 static volatile uint8_t conversation_state = CI_CONVERSATION_STATE_INACTIVE;
 static volatile TickType_t conversation_state_tick;
+static volatile uint8_t wake_prompt_policy = CI_WAKE_PROMPT_POLICY_NORMAL;
+static volatile TickType_t wake_prompt_policy_tick;
+
+static void set_wake_prompt_policy(uint8_t policy)
+{
+    taskENTER_CRITICAL();
+    wake_prompt_policy_tick = xTaskGetTickCount();
+    wake_prompt_policy = policy;
+    taskEXIT_CRITICAL();
+}
 
 static void set_conversation_state(uint8_t state)
 {
@@ -543,6 +553,7 @@ void ai_uart_i2s_handle_timeout(void)
         firmware_info_sent = 0;
         current_state = AI_UART_STATE_WAKEUP_WAIT;
         set_conversation_state(CI_CONVERSATION_STATE_INACTIVE);
+        set_wake_prompt_policy(CI_WAKE_PROMPT_POLICY_NORMAL);
         mprintf("[AI_UART] peer timeout state=stopping silence_ms=%u owner=system\r\n",
             (unsigned int)((now - last_peer_tick) * portTICK_PERIOD_MS));
     }
@@ -639,6 +650,15 @@ void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
             break;
         }
         set_conversation_state(cmd->payload[0]);
+        send_ack(cmd->seq, AI_UART_ACK_OK);
+        break;
+    case CI_WAKE_PROMPT_COMMAND_SET_POLICY:
+        if((1U != cmd->len) || (cmd->payload[0] > CI_WAKE_PROMPT_POLICY_QUIET_NIGHT))
+        {
+            send_ack(cmd->seq, AI_UART_ACK_FAILED);
+            break;
+        }
+        set_wake_prompt_policy(cmd->payload[0]);
         send_ack(cmd->seq, AI_UART_ACK_OK);
         break;
     case AI_UART_MSG_ENTER_WAKEUP_WAIT:
@@ -883,7 +903,18 @@ bool ai_uart_i2s_conversation_active(void)
     return active;
 }
 
-void ai_uart_i2s_on_wake(uint16_t wake_id)
+bool ai_uart_i2s_wake_prompt_quiet(void)
+{
+    bool quiet;
+    taskENTER_CRITICAL();
+    quiet = (link_state == AI_LINK_READY) &&
+        (wake_prompt_policy == CI_WAKE_PROMPT_POLICY_QUIET_NIGHT) &&
+        ((xTaskGetTickCount() - wake_prompt_policy_tick) < pdMS_TO_TICKS(5000));
+    taskEXIT_CRITICAL();
+    return quiet;
+}
+
+void ai_uart_i2s_on_wake(uint16_t wake_id, bool quiet)
 {
     uint8_t payload[2] = {(uint8_t)(wake_id & 0xff), (uint8_t)(wake_id >> 8)};
     stop_downlink();
@@ -895,7 +926,8 @@ void ai_uart_i2s_on_wake(uint16_t wake_id)
             mprintf("[AI_UART] wake preempt wait timeout\r\n");
         }
     }
-    send_frame(AI_UART_MSG_WAKE_DETECTED, payload, sizeof(payload));
+    send_frame(quiet ? CI_WAKE_PROMPT_EVENT_QUIET_WAKE : AI_UART_MSG_WAKE_DETECTED,
+        payload, sizeof(payload));
     send_state(AI_UART_STATE_LISTENING);
     send_uplink_ready();
 }

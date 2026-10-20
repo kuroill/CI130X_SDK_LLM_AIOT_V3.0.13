@@ -595,8 +595,20 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
     xSemaphoreTake(WakeupMutex, portMAX_DELAY);
 
     bool active_conversation = ai_uart_i2s_conversation_active();
-    ai_uart_i2s_on_wake(cmd_info_get_command_id(cmd_handle));
-    if(active_conversation)
+    bool quiet_wake = ai_uart_i2s_wake_prompt_quiet();
+    ai_uart_i2s_on_wake(cmd_info_get_command_id(cmd_handle), quiet_wake);
+
+    /* Quiet wake still leaves low power and restores the microphone path. */
+    if(SYS_STATE_UNWAKEUP == get_wakeup_state())
+    {
+        #if (USE_LOWPOWER_OSC_FREQUENCY||USE_LOWPOWER_DOWN_FREQUENCY)
+        pause_asr(0, 1);
+        UartPollingSenddone((UART_TypeDef*)CONFIG_CI_LOG_UART);
+        power_mode_switch(POWER_MODE_NORMAL);
+        resume_asr();
+        #endif
+    }
+    if(active_conversation || quiet_wake)
     {
         /* Wake is still reported and preempts old playback. Do not fabricate
          * DING_DONE: no prompt was played. Restore ASR without the ding callback. */
@@ -606,20 +618,23 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
         set_state_enter_wakeup(exit_wakup_ms);
         sys_weakup_hook();
         xSemaphoreGive(WakeupMutex);
+        /* Initial quiet wake retains the normal non-audio wake hooks. */
+        if(!active_conversation)
+        {
+            #if USE_IR_ENABLE
+            if(NULL != DeviceGetLearnModeDevice())
+            {
+                main_device_overLearnIR(pdFALSE, 0);
+            }
+            #endif
+            #if USE_VPR || USE_WMAN_VPR
+            vpr_run_one_recognition();
+            #endif
+        }
         send_msg_to_sys_task(&resume_msg, NULL);
-        mprintf("[WAKE] repeat wake reported; ding suppressed reason=active_conversation\r\n");
+        mprintf("[WAKE] wake reported; ding suppressed reason=%s\r\n",
+            quiet_wake ? "muted_night" : "active_conversation");
         return;
-    }
-
-    /*if last state is unwakeup, need change asr word*/
-    if(SYS_STATE_UNWAKEUP == get_wakeup_state())
-    {
-        #if (USE_LOWPOWER_OSC_FREQUENCY||USE_LOWPOWER_DOWN_FREQUENCY)
-        pause_asr(0, 1);
-        UartPollingSenddone((UART_TypeDef*)CONFIG_CI_LOG_UART);
-        power_mode_switch(POWER_MODE_NORMAL);
-        resume_asr();
-        #endif
     }
 
     //if(cmd_handle != INVALID_HANDLE)

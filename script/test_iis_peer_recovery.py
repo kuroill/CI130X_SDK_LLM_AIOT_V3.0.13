@@ -475,11 +475,9 @@ enum { SYS_MSG_TYPE_AI_UART_TIMEOUT=143 };
 #define USE_AUDIO_UPLOAD_BY_IIS 1
 static void audio_pre_rslt_report_diagnostics(void) { assert(!in_isr); }
 #define AI_UART_TASK_POLL_MS 50
-#define CI_CONVERSATION_COMMAND_SET_STATE 0x29
-#define CI_CONVERSATION_STATE_INACTIVE 0
-#define CI_CONVERSATION_STATE_WAITING 2
 typedef int UART_TypeDef;
 '''
+    source += (ROOT / "components/ci_common/ci_conversation.generated.h").read_text()
     for line in UART.splitlines():
         if re.match(r"#define AI_UART_(?:MSG_|STATE_|ACK_|HEARTBEAT_MS|PEER_TIMEOUT_MS|FIRMWARE_INFO_INTERVAL_MS)", line):
             source += line + "\n"
@@ -489,6 +487,8 @@ typedef int UART_TypeDef;
     source += r'''
 static volatile uint8_t current_state=AI_UART_STATE_WAKEUP_WAIT;
 static volatile uint8_t conversation_state;
+static volatile uint8_t wake_prompt_policy;
+static volatile TickType_t wake_prompt_policy_tick;
 static volatile TickType_t conversation_state_tick, last_peer_tick, last_firmware_info_tick;
 static volatile uint8_t i2s_rx_ready=1, firmware_info_sent;
 static volatile uint32_t dropped_commands;
@@ -520,7 +520,7 @@ static int send_msg_to_sys_task(sys_msg_t *event, void *w) {
     return 1;
 }
 '''
-    for name in ("set_conversation_state", "mark_peer_rx", "progress_peer_loss", "ai_uart_i2s_handle_timeout",
+    for name in ("set_conversation_state", "set_wake_prompt_policy", "mark_peer_rx", "progress_peer_loss", "ai_uart_i2s_handle_timeout",
                  "ai_uart_i2s_handle_command", "heartbeat_task", "ai_uart_i2s_peer_ready"):
         source += function(UART, name)
     source += r'''
@@ -536,11 +536,19 @@ int main(void) {
     ai_uart_i2s_command_t ping={.type=AI_UART_MSG_PING,.len=3};
     ai_uart_i2s_command_t start={.type=AI_UART_MSG_START_DOWNLINK};
     now=100; ai_uart_i2s_handle_command(&pong); assert(ai_uart_i2s_peer_ready());
+    ai_uart_i2s_command_t policy={.type=CI_WAKE_PROMPT_COMMAND_SET_POLICY,.len=1,.payload={1}};
+    ai_uart_i2s_handle_command(&policy);
+    assert(last_ack==AI_UART_ACK_OK && wake_prompt_policy==1 && wake_prompt_policy_tick==now);
+    policy.payload[0]=2; ai_uart_i2s_handle_command(&policy);
+    assert(last_ack==AI_UART_ACK_FAILED && wake_prompt_policy==1);
+    policy.len=0; ai_uart_i2s_handle_command(&policy);
+    assert(last_ack==AI_UART_ACK_FAILED && wake_prompt_policy==1);
     now=4000; heartbeat(1); assert(queued && timeout_event_queued);
     ai_uart_i2s_handle_command(&pong); deliver();
     assert(link_state==AI_LINK_READY && !stop_count); /* stale timeout */
     now=8000; audio_result=0; heartbeat(1); deliver();
     assert(link_state==AI_LINK_STOPPING && !ai_uart_i2s_peer_ready());
+    assert(wake_prompt_policy==CI_WAKE_PROMPT_POLICY_NORMAL);
     int stopped=stop_count, audio_stopped=audio_stop_count, pings=ping_count;
     heartbeat(100);
     assert(ping_count>=pings+4 && stop_count==stopped && audio_stop_count==audio_stopped);

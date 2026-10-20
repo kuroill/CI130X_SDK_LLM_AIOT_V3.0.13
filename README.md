@@ -7,6 +7,20 @@ CI130X SDK 适用于CI130X系列芯片
 官方文档：
 https://www.chipintelli.com/zh-cn/page/151.html
 
+## 夜间静音唤醒
+
+夜间静音唤醒新增生成契约 `0x2A SET_WAKE_PROMPT_POLICY`（0=normal、1=quiet-night）。
+ESP 用控制板确认的静音值和设备本地 21:00–06:00 判定，每秒经 UART owner 续约；
+CI 仅保存五秒 RAM 租约，peer loss 清除，退出对话不清除，音量/I2S/AEC 不变。
+实际静音的唤醒只发送 `0x1A QUIET_WAKE_DETECTED`（原 wake_id:u16le），不发
+`0x10` 或假的 DING_DONE；仍恢复识别、执行唤醒 hook、打断旧播放。ESP 把实际
+quiet 标记上云，由 IoT 播一次当前语言“我在”。发布需 IoT → CI → ESP，旧 ESP
+不下发此策略，因此新 CI 默认仍是普通唤醒行为。
+
+`python3 script/test_quiet_wake.py`、`python3 script/test_iis_peer_recovery.py`
+只做实际 C 函数的主机回归，不是正式固件构建。正式打包仍需 Windows；三语、
+静音/非静音、21:00/06:00、peer 掉线恢复及声音测试见 ESP README。
+
 ## SDK目录结构
 
 | 目录       | 描述             |
