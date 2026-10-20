@@ -59,7 +59,7 @@ static void mprintf(const char *format, ...) { (void)format; }
 typedef unsigned TickType_t;
 typedef enum { DISABLE, ENABLE } FunctionalState;
 typedef enum { CODEC_INPUT, CODEC_OUTPUT } io_direction_t;
-enum { PD, pin_0, PLAY_CODEC_ID, SAP_STATE_IDLE, SAP_STATE_PLAYING,
+enum { PD, pin_0, PLAY_CODEC_ID, PLAY_PRE_AUDIO_CODEC_ID, SAP_STATE_IDLE, SAP_STATE_PLAYING,
        CI_SS_PLAY_STATE, CI_SS_PLAY_STATE_PLAYING,
        CI_SS_PLAY_STATE_PLAYING_TO_IDLE, AI_UART_STATE_DOWNLINK_PLAYING };
 static struct { unsigned reg2b, reg2d, reg6, adc_gain, adc_enabled; } codec;
@@ -72,6 +72,10 @@ static TickType_t now;
 static TickType_t hpout_opened_at, pa_disabled_at;
 static uint8_t downlink_enabled, downlink_codec_started, i2s_rx_ready;
 static uint32_t downlink_bytes, downlink_nonzero_samples;
+static uint32_t downlink_generation, downlink_rx_overruns;
+static uint8_t downlink_fault_event_queued;
+static int32_t downlink_fault_detail;
+static int discard_error;
 static uint8_t downlink_play_buffer[2048];
 typedef struct { struct { unsigned block_num, buffer_num, block_size,
     buffer_size; void *pcm_buffer; } play_buffer_info; } cm_pcm_buffer_info_t;
@@ -151,6 +155,11 @@ static void cm_report_output_diagnostics(int index, const char *owner) {
 }
 static int cm_start_codec(int index, io_direction_t dir);
 static int cm_stop_codec(int index, io_direction_t dir);
+static int cm_discard_codec_input(int index, uint32_t *overruns) {
+    assert(held && index == PLAY_PRE_AUDIO_CODEC_ID);
+    *overruns = 7; /* Idle overruns are the new epoch's baseline, not a fault. */
+    return discard_error;
+}
 static int cm_get_codec_busy_buffer_number(int index, io_direction_t dir) {
     assert(pa_enabled()); /* Natural FINISH must not close the PA before drain. */
     int result = busy_buffers;
@@ -175,6 +184,11 @@ static void resume_asr(void) { }
         constants += f"#define {name} {define(text, name)}U\n"
     source = constants + source
     source += trace_type.group() + "\nstatic ai_downlink_pcm_trace_t downlink_pcm_trace;\n"
+    fault_type = re.search(r"typedef enum\s*\{[^}]*\}\s*ai_downlink_fault_t;", UART)
+    assert fault_type
+    source += fault_type.group() + "\nstatic ai_downlink_fault_t downlink_fault;\n"
+    source += function(UART, "report_downlink_fault")
+    source += function(UART, "freeze_downlink_fault")
     pa_type = re.search(r"typedef enum\s*\{[^}]*\}\s*audio_pa_state_t;", PLAYER)
     assert pa_type
     source += pa_type.group() + "\nstatic audio_pa_state_t audio_pa_state;\n"
@@ -238,6 +252,9 @@ static void reset(int active_level) {
     local_stop_ok = 1;
     stop_requested = held = busy_buffers = busy_stuck = downlink_starting = 0;
     downlink_enabled = downlink_codec_started = 0;
+    downlink_generation = downlink_rx_overruns = downlink_fault_event_queued = 0;
+    downlink_fault = AI_DOWNLINK_FAULT_NONE;
+    downlink_fault_detail = discard_error = 0;
     i2s_rx_ready = 1;
     play_state = 0;
     now = 0;
@@ -314,6 +331,8 @@ static void test_failures(void) {
     assert(stop_requested == 2);
     assert(!finish_downlink(99)); /* Missing PCM stays an error, then closes PA. */
     assert(!pa_enabled() && hpout_muted() && !downlink_enabled);
+    assert(downlink_fault == AI_DOWNLINK_FAULT_FINISH_PCM_TIMEOUT);
+    assert(!finish_downlink(0)); /* Even a changed/late count cannot erase failure. */
     assert_gain_and_capture_unchanged();
     begin_downlink();
     downlink_nonzero_samples = 99;
@@ -321,7 +340,25 @@ static void test_failures(void) {
     busy_stuck = 1;
     assert(!finish_downlink(99)); /* Drain timeout also closes through the owner. */
     assert(!pa_enabled() && hpout_muted() && !downlink_codec_started);
+    assert(downlink_fault == AI_DOWNLINK_FAULT_FINISH_DRAIN_TIMEOUT);
+    assert(!finish_downlink(99)); /* stop cleared busy queue, not the failure fact. */
     assert_gain_and_capture_unchanged();
+    busy_stuck = 0;
+    begin_downlink();
+    downlink_nonzero_samples = 99;
+    xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+    freeze_downlink_fault(AI_DOWNLINK_FAULT_DAC_QUEUE, -2);
+    xSemaphoreGive(downlink_mutex);
+    assert(!finish_downlink(99)); /* Expected count cannot hide an ingress fault. */
+    assert(!pa_enabled() && downlink_fault == AI_DOWNLINK_FAULT_DAC_QUEUE);
+    stop_downlink();
+    assert(!finish_downlink(99)); /* Duplicate STOP/late FINISH retain failure. */
+    begin_downlink();
+    assert(downlink_fault == AI_DOWNLINK_FAULT_NONE && downlink_rx_overruns == 7);
+    stop_downlink();
+    discard_error = -1;
+    assert(!start_downlink());
+    assert(!pa_enabled() && hpout_muted() && !downlink_codec_started);
 }
 int main(void) {
     assert(!board_callbacks.codec_start && !board_callbacks.codec_stop);

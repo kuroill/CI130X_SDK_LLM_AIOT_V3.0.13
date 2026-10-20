@@ -143,6 +143,7 @@ typedef enum
     SYS_MSG_TYPE_AI_UART,
     SYS_MSG_TYPE_AI_UART_TIMEOUT,
     SYS_MSG_TYPE_AI_I2S_UPLINK_START,
+    SYS_MSG_TYPE_AI_DOWNLINK_FAULT,
 }sys_msg_type_t;
 
 
@@ -163,6 +164,7 @@ typedef struct
         sys_msg_net_data_t  net_data;
         sys_msg_i2c_data_t  i2c_data;
         ai_uart_i2s_command_t ai_uart_data;
+        uint32_t ai_downlink_generation;
     }msg_data;
 }sys_msg_t;
 

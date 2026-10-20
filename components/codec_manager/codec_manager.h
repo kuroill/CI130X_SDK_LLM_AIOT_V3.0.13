@@ -205,6 +205,18 @@ extern int cm_cancel_slave_output(int codec_index);
 
 extern int cm_read_codec(int codec_index, uint32_t * data_addr, uint32_t * data_size);
 
+/* Task-only, nonblocking owned-PCM APIs. The caller serializes codec
+ * configuration/stop with these calls. No borrowed DAC pointer escapes.
+ * copy/try_write: 1=completed, 0=temporarily empty/full, negative=error.
+ * try_write -2=busy enqueue failed (buffer returned), -3=return failed.
+ * discard/get_overruns: 0=success, -1=invalid codec/configuration.
+ * The legacy read/write APIs retain their existing semantics. */
+extern int cm_copy_codec_input(int codec_index, void *destination,
+    uint32_t capacity, uint32_t *data_size, uint32_t *overruns);
+extern int cm_discard_codec_input(int codec_index, uint32_t *overruns);
+extern int cm_get_input_overruns(int codec_index, uint32_t *overruns);
+extern int cm_try_write_codec_pcm(int codec_index, const void *pcm, uint32_t size);
+
 extern int cm_write_codec(int codec_index, void * pcm_buffer,uint32_t wait_tick);
 
 extern void cm_get_pcm_buffer(int codec_index,uint32_t* ret_buf,uint32_t wait_tick);

@@ -492,6 +492,8 @@ static volatile TickType_t wake_prompt_policy_tick;
 static volatile TickType_t conversation_state_tick, last_peer_tick, last_firmware_info_tick;
 static volatile uint8_t i2s_rx_ready=1, firmware_info_sent;
 static volatile uint32_t dropped_commands;
+static uint32_t downlink_generation;
+static void ai_uart_i2s_handle_downlink_fault(uint32_t generation) {}
 static void send_frame(uint8_t type,const uint8_t *p,unsigned n) {
     if(type==AI_UART_MSG_PING) ++ping_count;
     if(type==AI_UART_MSG_PONG) ++pong_count;

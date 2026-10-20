@@ -7,6 +7,63 @@ CI130X SDK 适用于CI130X系列芯片
 官方文档：
 https://www.chipintelli.com/zh-cn/page/151.html
 
+## 2026-10-21 下行故障安全修复
+
+本节优先于下文历史的 100% 音量、长回复和反复播放验收。此前最后一轮播放出现
+强烈爆音、CI UART 失联及随后重新握手；尚无 CI 同时段复位原因与模拟波形，
+不能将这次修改解释为已经证明爆音根因或完成实机修复。
+
+下行 worker 不再持有 RX DMA 环裸指针等待 DAC：先复制到静态自有帧，再以零等待
+方式尝试写入 DAC 队列。DAC 暂满时锁外让出一个 tick，并重试同一帧；DAC buffer
+只在同一锁内借出、入队或归还，不把借出的 buffer 带到锁外等待。样本计数与摘要
+只在实际入队成功后提交。正常停止、FINISH、AEC、双槽格式和用户音量保持原样。
+
+START/STOP 的 generation 隔离旧帧和迟到故障事件。START 在原有 PA 稳定准备后
+有界丢弃旧 RX 数据，并建立本轮 overrun 基线；空闲继续排空 RX。实际环溢出、
+复制失败、DAC 无进展或入队失败会冻结本轮并报告故障，由原 system-message owner
+执行停播；worker 不直接操作 PA 或停止 codec。失败事实保留至下一次 START，
+迟到 FINISH 不能把失败轮次伪报为完整播放。
+
+启动核对 `[DOWNLINK_GUARD] version=1 rx=owned_copy dac=nonblocking_retry
+fault_owner=system`。其中 `resetState` 是 SDK 对正常上电/异常复位的原始分类，
+不是具体的看门狗或掉电原因；UART `FIRMWARE_INFO` 的 boot_state 也不能代替它。
+
+保护边界：CPU 临界区不能冻结 DMA，新副本消除了跨无界 DAC 等待的确定风险，
+但 DMA/ISR 极端时序仍须实机验证。通用 `cm_stop_codec` 的硬件缓冲回收仍依赖
+DMA/IRQ；本路径先执行静音及现有 PA 关闭，再调用它，不能声称全部硬件等待有界，
+也不能从软件调用推断功放已经电气静音。新增约一帧 stereo 和一帧 mono 的静态
+暂存需要在 Windows 正式链接时核对 RAM 余量。
+
+用户按原 Windows 流程构建和更新 CI，并同步更新 ESP 的取消优先收尾。没有
+UART/云端协议变化，不需要为此更新 IoT；两端补齐后再做安全验收：
+
+1. 先确认安全断电条件，在低音量、远离耳朵的短句测试中同时保存 ESP/CI 日志。
+   不戴耳机或直接重放导致爆音的长句；异常刺耳声再次出现就停止测试。
+2. 正常短句应 FINISH 成功；同次完整播放的两端 `CI_PCM` 非零样本数/摘要一致。
+   匹配不代表模拟音质正常，中断轮不作完整摘要比较。
+3. 验证真人及唤醒词打断后下一轮：STOP 仍由原 owner 执行；旧代故障事件和音频
+   不得关闭或污染新轮。中文、英语、西班牙语都要分别验证。
+4. 在可控测试环境检查故障：保留 `[DOWNLINK] fault stopped` 的 generation、
+   reason/detail，以及 FINISH 失败、PA 顺序、`AUDIO_DMA`、CI 重启和握手日志。
+   将接收环溢出、DAC 等待/入队故障、CI 重启和模拟杂音分别判定，不统称网络故障。
+5. 短句与异常停止确认安全后才逐步延长播报。主机回归不生成正式固件，不证明
+   DAC/I2S、真实抢占时序或扬声器安全；Windows 构建和实机验收均由用户完成。
+
+可在 macOS 执行以下检查；`-B` 避免修改仓库中已有的 Python 字节码缓存：
+
+```sh
+python3 -B script/test_downlink_pcm_ownership.py
+python3 -B script/test_downlink_pcm_trace.py
+python3 -B script/test_pa_idle_mute.py
+python3 -B script/test_iis_peer_recovery.py
+python3 -B script/test_quiet_wake.py
+python3 -B script/test_ci_build_headers.py
+```
+
+ownership 回归执行实际 C 函数，覆盖同帧等待后继续播放、旧 generation 隔离、
+故障事件队列满与同步消费、DAC buffer 借还、接收环溢出及失败 FINISH 重试；
+模拟不包含真实 DMA 与模拟电路。
+
 ## 夜间静音唤醒
 
 夜间静音唤醒新增生成契约 `0x2A SET_WAKE_PROMPT_POLICY`（0=normal、1=quiet-night）。

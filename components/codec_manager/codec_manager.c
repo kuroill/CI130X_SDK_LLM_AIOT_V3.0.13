@@ -42,6 +42,7 @@ typedef struct
 {
     uint32_t write_addr;                                //写指针，用于记录正在被IISDMA使用的BUFFER地址
     uint32_t read_addr;                                 //读指针，用于记录下次读取数据的起始地址
+    volatile uint32_t overrun_blocks;                   //ISR discarded unread blocks, including idle periods.
     SemaphoreHandle_t recorded_count_sem;               //用于同步已录block数的计数信号量。
 }record_buffer_queue_t;
 
@@ -507,6 +508,7 @@ int cm_config_pcm_buffer(int codec_index, io_direction_t io_dir, cm_pcm_buffer_i
         p_codec_info->record_buffer_info = pcm_buffer_info->record_buffer_info;
         p_codec_info->record_buffer_queue.read_addr = (uint32_t)pcm_buffer_info->record_buffer_info.pcm_buffer;
         p_codec_info->record_buffer_queue.write_addr = (uint32_t)pcm_buffer_info->record_buffer_info.pcm_buffer;
+        p_codec_info->record_buffer_queue.overrun_blocks = 0;
         if (p_codec_info->record_buffer_queue.recorded_count_sem)
         {
             vSemaphoreDelete(p_codec_info->record_buffer_queue.recorded_count_sem);
@@ -987,6 +989,118 @@ int cm_read_codec(int codec_index, uint32_t * data_addr, uint32_t * data_size)
     return 0;
 }
 
+int cm_get_input_overruns(int codec_index, uint32_t *overruns)
+{
+    if(codec_index < 0 || codec_index >= MAX_CODEC_NUM || !overruns ||
+       !cm.reg_flag[codec_index] || check_curr_trap() ||
+       !cm.codec_info[codec_index].record_buffer_queue.recorded_count_sem)
+    {
+        return -1;
+    }
+    portENTER_CRITICAL();
+    *overruns = cm.codec_info[codec_index].record_buffer_queue.overrun_blocks;
+    portEXIT_CRITICAL();
+    return 0;
+}
+
+int cm_copy_codec_input(int codec_index, void *destination,
+    uint32_t capacity, uint32_t *data_size, uint32_t *overruns)
+{
+    if(!destination || !data_size || cm_get_input_overruns(codec_index, overruns))
+    {
+        return -1;
+    }
+    codec_info_t *info = &cm.codec_info[codec_index];
+    record_buffer_queue_t *queue = &info->record_buffer_queue;
+    cm_record_buffer_info_t *buffer = &info->record_buffer_info;
+    *data_size = 0;
+    if(!buffer->block_size || capacity < buffer->block_size)
+    {
+        return -1;
+    }
+    /* Copy exactly one completed block before relinquishing its ring slot.
+     * No DMA pointer survives this bounded critical section; it contains no
+     * waiting, logging, trace hashing or DAC operation. DMA itself keeps running. */
+    portENTER_CRITICAL();
+    if(pdTRUE != xSemaphoreTake(queue->recorded_count_sem, 0))
+    {
+        *overruns = queue->overrun_blocks;
+        portEXIT_CRITICAL();
+        return 0;
+    }
+    memcpy(destination, (const void *)queue->read_addr, buffer->block_size);
+    queue->read_addr += buffer->block_size;
+    if(queue->read_addr >= (uint32_t)buffer->pcm_buffer + buffer->buffer_size)
+    {
+        queue->read_addr = (uint32_t)buffer->pcm_buffer;
+    }
+    *data_size = buffer->block_size;
+    *overruns = queue->overrun_blocks;
+    portEXIT_CRITICAL();
+    return 1;
+}
+
+int cm_discard_codec_input(int codec_index, uint32_t *overruns)
+{
+    if(cm_get_input_overruns(codec_index, overruns))
+    {
+        return -1;
+    }
+    codec_info_t *info = &cm.codec_info[codec_index];
+    record_buffer_queue_t *queue = &info->record_buffer_queue;
+    /* ISR cannot append while taking this finite snapshot. Do not chase the
+     * always-on input stream; the next DMA completion becomes the first frame. */
+    portENTER_CRITICAL();
+    UBaseType_t completed = uxQueueMessagesWaiting(queue->recorded_count_sem);
+    if(completed > info->record_buffer_info.block_num)
+    {
+        portEXIT_CRITICAL();
+        return -1;
+    }
+    for(UBaseType_t i = 0; i < completed; ++i)
+    {
+        if(pdTRUE != xSemaphoreTake(queue->recorded_count_sem, 0))
+        {
+            portEXIT_CRITICAL();
+            return -1;
+        }
+    }
+    queue->read_addr = queue->write_addr;
+    *overruns = queue->overrun_blocks;
+    portEXIT_CRITICAL();
+    return 0;
+}
+
+int cm_try_write_codec_pcm(int codec_index, const void *pcm, uint32_t size)
+{
+    if(codec_index < 0 || codec_index >= MAX_CODEC_NUM || !pcm ||
+       !cm.reg_flag[codec_index] || check_curr_trap())
+    {
+        return -1;
+    }
+    codec_info_t *info = &cm.codec_info[codec_index];
+    play_buffer_queue_t *queue = &info->play_buffer_queue;
+    if(!queue->idle_queue || !queue->busy_queue ||
+       !size || size != info->play_buffer_info.buffer_size)
+    {
+        return -1;
+    }
+    void *output = NULL;
+    if(pdTRUE != xQueueReceive(queue->idle_queue, &output, 0))
+    {
+        return 0;
+    }
+    memcpy(output, pcm, size);
+    if(pdTRUE == xQueueSend(queue->busy_queue, &output, 0))
+    {
+        return 1;
+    }
+    /* A failed enqueue must return its loan before the caller releases its
+     * lifecycle mutex. Even corruption/failure cannot introduce a blocking
+     * loan: distinguish a failed return so the owner can report it explicitly. */
+    return pdTRUE == xQueueSend(queue->idle_queue, &output, 0) ? -2 : -3;
+}
+
 int cm_write_codec(int codec_index, void * pcm_buffer,uint32_t wait_tick)
 {
     if (MAX_CODEC_NUM <= codec_index)
@@ -1249,6 +1363,7 @@ void cm_input_interrupt_handler(IISDMAChax dma_channel, BaseType_t * xHigherPrio
     // 如果写指针赶上读指针了，说明取数据太慢了，强制移动读指针，丢弃以前的数据。
     if (record_buffer_queue->write_addr == record_buffer_queue->read_addr)
     {
+        record_buffer_queue->overrun_blocks++;
         record_buffer_queue->read_addr += record_buffer_info->block_size;
         if (record_buffer_queue->read_addr >= (uint32_t)record_buffer_info->pcm_buffer + record_buffer_info->buffer_size)
         {

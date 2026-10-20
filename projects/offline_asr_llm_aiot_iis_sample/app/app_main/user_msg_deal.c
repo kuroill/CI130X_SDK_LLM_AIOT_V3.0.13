@@ -581,6 +581,9 @@ uint32_t deal_userdef_msg(sys_msg_t *msg)
     case SYS_MSG_TYPE_AI_UART_TIMEOUT:
         ai_uart_i2s_handle_timeout();
         break;
+    case SYS_MSG_TYPE_AI_DOWNLINK_FAULT:
+        ai_uart_i2s_handle_downlink_fault(msg->msg_data.ai_downlink_generation);
+        break;
     case SYS_MSG_TYPE_AI_I2S_UPLINK_START:
         audio_pre_rslt_handle_start();
         break;

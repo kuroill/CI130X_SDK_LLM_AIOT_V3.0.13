@@ -20,6 +20,8 @@ int ai_uart_i2s_peer_ready(void);
 void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd);
 /* Only the existing system-message owner executes link-loss side effects. */
 void ai_uart_i2s_handle_timeout(void);
+/* Internal system-message event; generation rejects a stale failed stream. */
+void ai_uart_i2s_handle_downlink_fault(uint32_t generation);
 bool ai_uart_i2s_conversation_active(void);
 bool ai_uart_i2s_wake_prompt_quiet(void);
 void ai_uart_i2s_on_wake(uint16_t wake_id, bool quiet);

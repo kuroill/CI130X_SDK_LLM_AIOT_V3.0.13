@@ -18,6 +18,7 @@
 #include "user_config.h"
 #include "cias_audio_data_handle.h"
 #include "ci130x_dpmu.h"
+#include "ci130x_scu.h"
 #include "ci_flash_data_info.h"
 
 #define AI_UART_PROTOCOL_VERSION 0x04
@@ -33,6 +34,7 @@
 #define AI_DOWNLINK_FINISH_POLL_MS 5
 #define AI_AEC_START_WARN_MS 500
 #define AI_DOWNLINK_PCM_BUFFER_COUNT 4
+#define AI_DOWNLINK_DAC_WAIT_MS 100
 #define AI_AEC_START_WARN_POLLS \
     ((AI_AEC_START_WARN_MS + AI_UART_TASK_POLL_MS - 1U) / AI_UART_TASK_POLL_MS)
 
@@ -110,6 +112,36 @@ typedef struct
     uint32_t stereo_mismatches;
 }ai_downlink_pcm_trace_t;
 static ai_downlink_pcm_trace_t downlink_pcm_trace;
+typedef enum
+{
+    AI_DOWNLINK_FAULT_NONE = 0,
+    AI_DOWNLINK_FAULT_RX,
+    AI_DOWNLINK_FAULT_RX_OVERRUN,
+    AI_DOWNLINK_FAULT_DAC_TIMEOUT,
+    AI_DOWNLINK_FAULT_DAC_QUEUE,
+    AI_DOWNLINK_FAULT_FINISH_PCM_TIMEOUT,
+    AI_DOWNLINK_FAULT_FINISH_DRAIN_TIMEOUT,
+}ai_downlink_fault_t;
+static void freeze_downlink_fault(ai_downlink_fault_t fault, int32_t detail);
+/* All lifecycle/fault fields are protected by downlink_mutex. The system
+ * message owner alone starts/stops hardware; the worker may only freeze ingress. */
+static uint32_t downlink_generation;
+static uint32_t downlink_rx_overruns;
+static ai_downlink_fault_t downlink_fault;
+static int32_t downlink_fault_detail;
+static uint8_t downlink_fault_event_queued;
+typedef struct
+{
+    uint32_t generation;
+    uint32_t size;
+    uint32_t nonzero_samples;
+    TickType_t waiting_since;
+    ai_downlink_pcm_trace_t trace;
+    int16_t pcm[AUDIO_CAP_POINT_NUM_PER_FRM];
+}ai_downlink_pending_t;
+/* Worker-only scratch, never a borrowed DMA/DAC pointer. Off the small task stack. */
+static ai_downlink_pending_t downlink_pending;
+static int16_t downlink_input_copy[2U * AUDIO_CAP_POINT_NUM_PER_FRM];
 static volatile uint32_t dropped_commands;
 static uint8_t downlink_play_buffer[
     AUDIO_CAP_POINT_NUM_PER_FRM * sizeof(int16_t) * AI_DOWNLINK_PCM_BUFFER_COUNT];
@@ -223,6 +255,24 @@ static void send_uplink_ready(void)
     send_frame(AI_UART_MSG_UPLINK_READY, payload, sizeof(payload));
 }
 
+static void report_downlink_fault(uint32_t generation, ai_downlink_fault_t fault, int32_t detail)
+{
+    const char *reason = "unknown";
+    switch(fault)
+    {
+    case AI_DOWNLINK_FAULT_RX: reason = "rx_copy"; break;
+    case AI_DOWNLINK_FAULT_RX_OVERRUN: reason = "rx_overrun"; break;
+    case AI_DOWNLINK_FAULT_DAC_TIMEOUT: reason = "dac_wait_timeout"; break;
+    case AI_DOWNLINK_FAULT_DAC_QUEUE: reason = "dac_queue"; break;
+    case AI_DOWNLINK_FAULT_FINISH_PCM_TIMEOUT: reason = "pcm_timeout"; break;
+    case AI_DOWNLINK_FAULT_FINISH_DRAIN_TIMEOUT: reason = "codec_drain_timeout"; break;
+    default: break;
+    }
+    mprintf("[DOWNLINK] fault stopped owner=system generation=%lu reason=%s detail=%ld pa=%s\r\n",
+        (unsigned long)generation, reason, (long)detail,
+        PLAYER_CONTROL_PA ? "off" : "keep-on");
+}
+
 static void stop_downlink(void)
 {
     uint8_t was_active;
@@ -234,6 +284,10 @@ static void stop_downlink(void)
     xSemaphoreTake(downlink_mutex, portMAX_DELAY);
     was_active = downlink_enabled || downlink_codec_started;
     downlink_enabled = 0;
+    downlink_generation++;
+    downlink_fault_event_queued = 0;
+    /* Retain downlink_fault until a new START, including after a duplicate
+     * STOP. A late FINISH must not turn an already failed stream into success. */
     if(downlink_codec_started)
     {
         cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
@@ -283,6 +337,17 @@ static uint8_t finish_downlink(uint32_t expected_nonzero_samples)
     for(;;)
     {
         xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+        if(downlink_fault != AI_DOWNLINK_FAULT_NONE)
+        {
+            uint32_t generation = downlink_generation;
+            ai_downlink_fault_t fault = downlink_fault;
+            int32_t detail = downlink_fault_detail;
+            xSemaphoreGive(downlink_mutex);
+            stop_downlink();
+            report_downlink_fault(generation, fault, detail);
+            mprintf("[DOWNLINK] finish failed reason=stream_fault\r\n");
+            return 0;
+        }
         received_nonzero_samples = downlink_nonzero_samples;
         if(received_nonzero_samples >= expected_nonzero_samples)
         {
@@ -297,11 +362,17 @@ static uint8_t finish_downlink(uint32_t expected_nonzero_samples)
 
         if((xTaskGetTickCount() - started_at) >= timeout_ticks)
         {
+            xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+            freeze_downlink_fault(AI_DOWNLINK_FAULT_FINISH_PCM_TIMEOUT,
+                AI_DOWNLINK_FINISH_TIMEOUT_MS);
+            uint32_t generation = downlink_generation;
+            xSemaphoreGive(downlink_mutex);
+            stop_downlink();
+            report_downlink_fault(generation, downlink_fault, downlink_fault_detail);
             mprintf(
                 "[DOWNLINK] finish failed reason=pcm_timeout expectedNonzero=%u receivedNonzero=%u\r\n",
                 (unsigned int)expected_nonzero_samples,
                 (unsigned int)received_nonzero_samples);
-            stop_downlink();
             return 0;
         }
         vTaskDelay(pdMS_TO_TICKS(AI_DOWNLINK_FINISH_POLL_MS));
@@ -311,12 +382,19 @@ static uint8_t finish_downlink(uint32_t expected_nonzero_samples)
     {
         if((xTaskGetTickCount() - started_at) >= timeout_ticks)
         {
+            int busy = cm_get_codec_busy_buffer_number(PLAY_CODEC_ID, CODEC_OUTPUT);
+            xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+            freeze_downlink_fault(AI_DOWNLINK_FAULT_FINISH_DRAIN_TIMEOUT,
+                AI_DOWNLINK_FINISH_TIMEOUT_MS);
+            uint32_t generation = downlink_generation;
+            xSemaphoreGive(downlink_mutex);
+            stop_downlink();
+            report_downlink_fault(generation, downlink_fault, downlink_fault_detail);
             mprintf(
                 "[DOWNLINK] finish failed reason=codec_drain_timeout expectedNonzero=%u receivedNonzero=%u busy=%d\r\n",
                 (unsigned int)expected_nonzero_samples,
                 (unsigned int)received_nonzero_samples,
-                cm_get_codec_busy_buffer_number(PLAY_CODEC_ID, CODEC_OUTPUT));
-            stop_downlink();
+                busy);
             return 0;
         }
         vTaskDelay(pdMS_TO_TICKS(AI_DOWNLINK_FINISH_POLL_MS));
@@ -363,50 +441,180 @@ static uint32_t copy_downlink_pcm_with_trace(const int16_t *input, int16_t *outp
     return nonzero_samples;
 }
 
+static void freeze_downlink_fault(ai_downlink_fault_t fault, int32_t detail)
+{
+    /* Caller holds downlink_mutex. No logging, hardware stop or UART here. */
+    if(downlink_fault == AI_DOWNLINK_FAULT_NONE)
+    {
+        downlink_fault = fault;
+        downlink_fault_detail = detail;
+        downlink_enabled = 0;
+    }
+}
+
+static void post_downlink_fault(void)
+{
+    sys_msg_t event;
+    memset(&event, 0, sizeof(event));
+    xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+    if(downlink_fault == AI_DOWNLINK_FAULT_NONE || !downlink_codec_started ||
+       downlink_fault_event_queued)
+    {
+        xSemaphoreGive(downlink_mutex);
+        return;
+    }
+    event.msg_type = SYS_MSG_TYPE_AI_DOWNLINK_FAULT;
+    event.msg_data.ai_downlink_generation = downlink_generation;
+    downlink_fault_event_queued = 1;
+    xSemaphoreGive(downlink_mutex);
+    if(pdPASS != send_msg_to_sys_task(&event, NULL))
+    {
+        /* Full system queue: retain the fault and retry next worker tick. */
+        xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+        if(downlink_generation == event.msg_data.ai_downlink_generation)
+        {
+            downlink_fault_event_queued = 0;
+        }
+        xSemaphoreGive(downlink_mutex);
+    }
+}
+
+void ai_uart_i2s_handle_downlink_fault(uint32_t generation)
+{
+    ai_downlink_fault_t fault;
+    int32_t detail;
+    xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+    if(generation != downlink_generation ||
+       downlink_fault == AI_DOWNLINK_FAULT_NONE || !downlink_codec_started)
+    {
+        xSemaphoreGive(downlink_mutex);
+        return;
+    }
+    fault = downlink_fault;
+    detail = downlink_fault_detail;
+    xSemaphoreGive(downlink_mutex);
+    /* Only called by the system message owner. No START can interleave between
+     * the generation check and stop; worker faults cannot change generation. */
+    stop_downlink();
+    report_downlink_fault(generation, fault, detail);
+    send_state(AI_UART_STATE_LISTENING);
+}
+
+static uint8_t pump_downlink_once(void)
+{
+    uint8_t progressed = 0;
+    uint32_t overruns = 0;
+    xSemaphoreTake(downlink_mutex, portMAX_DELAY);
+    if(!i2s_rx_ready)
+    {
+        downlink_pending.size = 0;
+        xSemaphoreGive(downlink_mutex);
+        return 0;
+    }
+    if(!downlink_enabled)
+    {
+        /* The physical RX clock is always on: preserve the existing idle drain.
+         * This local snapshot must not clear a frozen epoch's fault/baseline.
+         * START checks discard success before enabling the next playback. */
+        cm_discard_codec_input(PLAY_PRE_AUDIO_CODEC_ID, &overruns);
+        downlink_pending.size = 0;
+        xSemaphoreGive(downlink_mutex);
+        return 0;
+    }
+    if(downlink_pending.generation != downlink_generation)
+    {
+        downlink_pending.size = 0;
+    }
+    if(cm_get_input_overruns(PLAY_PRE_AUDIO_CODEC_ID, &overruns))
+    {
+        freeze_downlink_fault(AI_DOWNLINK_FAULT_RX, -1);
+    }
+    else if(overruns != downlink_rx_overruns)
+    {
+        freeze_downlink_fault(AI_DOWNLINK_FAULT_RX_OVERRUN,
+            (int32_t)(overruns - downlink_rx_overruns));
+    }
+    else
+    {
+        if(!downlink_pending.size)
+        {
+            uint32_t input_size = 0;
+            int copied = cm_copy_codec_input(PLAY_PRE_AUDIO_CODEC_ID,
+                downlink_input_copy, sizeof(downlink_input_copy), &input_size, &overruns);
+            if(copied < 0 || (copied > 0 && input_size != sizeof(downlink_input_copy)))
+            {
+                freeze_downlink_fault(AI_DOWNLINK_FAULT_RX, copied);
+            }
+            else if(overruns != downlink_rx_overruns)
+            {
+                freeze_downlink_fault(AI_DOWNLINK_FAULT_RX_OVERRUN,
+                    (int32_t)(overruns - downlink_rx_overruns));
+            }
+            else if(copied > 0)
+            {
+                downlink_pending.generation = downlink_generation;
+                downlink_pending.trace = downlink_pcm_trace;
+                downlink_pending.nonzero_samples = copy_downlink_pcm_with_trace(
+                    downlink_input_copy, downlink_pending.pcm,
+                    AUDIO_CAP_POINT_NUM_PER_FRM, &downlink_pending.trace);
+                downlink_pending.size = sizeof(downlink_pending.pcm);
+                downlink_pending.waiting_since = xTaskGetTickCount();
+            }
+        }
+        if(downlink_pending.size && downlink_enabled)
+        {
+            /* Recheck after the bounded copy/hash, and on every DAC retry. A
+             * real ring overrun is a failed stream, not silent frame dropping. */
+            if(cm_get_input_overruns(PLAY_PRE_AUDIO_CODEC_ID, &overruns))
+            {
+                freeze_downlink_fault(AI_DOWNLINK_FAULT_RX, -1);
+            }
+            else if(overruns != downlink_rx_overruns)
+            {
+                freeze_downlink_fault(AI_DOWNLINK_FAULT_RX_OVERRUN,
+                    (int32_t)(overruns - downlink_rx_overruns));
+            }
+            else
+            {
+                int written = cm_try_write_codec_pcm(PLAY_CODEC_ID,
+                    downlink_pending.pcm, downlink_pending.size);
+                if(written > 0)
+                {
+                    downlink_bytes += downlink_pending.size;
+                    downlink_nonzero_samples += downlink_pending.nonzero_samples;
+                    downlink_pcm_trace = downlink_pending.trace;
+                    downlink_pending.size = 0;
+                    progressed = 1;
+                }
+                else if(written < 0)
+                {
+                    freeze_downlink_fault(AI_DOWNLINK_FAULT_DAC_QUEUE, written);
+                }
+                else if((xTaskGetTickCount() - downlink_pending.waiting_since) >=
+                        pdMS_TO_TICKS(AI_DOWNLINK_DAC_WAIT_MS))
+                {
+                    freeze_downlink_fault(AI_DOWNLINK_FAULT_DAC_TIMEOUT,
+                        AI_DOWNLINK_DAC_WAIT_MS);
+                }
+            }
+        }
+    }
+    xSemaphoreGive(downlink_mutex);
+    return progressed;
+}
+
 static void downlink_task(void *arg)
 {
     (void)arg;
     for(;;)
     {
-        uint32_t input_addr = 0;
-        uint32_t input_size = 0;
-        if(!i2s_rx_ready)
+        uint8_t progressed = pump_downlink_once();
+        post_downlink_fault();
+        if(!progressed)
         {
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
-        }
-        cm_read_codec(PLAY_PRE_AUDIO_CODEC_ID, &input_addr, &input_size);
-        if(input_addr && input_size)
-        {
-            xSemaphoreTake(downlink_mutex, portMAX_DELAY);
-            if(!downlink_enabled)
-            {
-                xSemaphoreGive(downlink_mutex);
-                continue;
-            }
-            const int16_t *input_pcm = (const int16_t *)input_addr;
-            uint32_t sample_count = input_size / (2U * sizeof(int16_t));
-            if(sample_count > AUDIO_CAP_POINT_NUM_PER_FRM)
-            {
-                sample_count = AUDIO_CAP_POINT_NUM_PER_FRM;
-            }
-            uint32_t output_addr = 0;
-            /* This custom UART/IIS owner has no retry path after consuming an
-             * RX frame, so preserve it with DAC back-pressure instead of a
-             * lossy timeout. */
-            cm_get_pcm_buffer(PLAY_CODEC_ID, &output_addr, portMAX_DELAY);
-            if(output_addr)
-            {
-                int16_t *output_pcm = (int16_t *)output_addr;
-                /* ESP sends mono duplicated into both IIS slots. Preserve the
-                 * existing left-slot copy; diagnostics never alter its gain. */
-                uint32_t nonzero_samples = copy_downlink_pcm_with_trace(
-                    input_pcm, output_pcm, sample_count, &downlink_pcm_trace);
-                cm_write_codec(PLAY_CODEC_ID, (void *)output_addr, 0);
-                downlink_bytes += sample_count * sizeof(int16_t);
-                downlink_nonzero_samples += nonzero_samples;
-            }
-            xSemaphoreGive(downlink_mutex);
+            /* No mutex or DAC loan survives this wait. Retry the same owned
+             * frame; normal DAC backpressure does not consume another RX block. */
+            vTaskDelay(1);
         }
     }
 }
@@ -421,6 +629,12 @@ static uint8_t start_downlink(void)
     {
         xSemaphoreGive(downlink_mutex);
         return 1;
+    }
+    if(downlink_codec_started)
+    {
+        /* The failed old owner must finish cleanup before queues are rebuilt. */
+        xSemaphoreGive(downlink_mutex);
+        return 0;
     }
     if(!i2s_rx_ready)
     {
@@ -457,6 +671,10 @@ static uint8_t start_downlink(void)
 
     downlink_bytes = 0;
     downlink_nonzero_samples = 0;
+    downlink_generation++;
+    downlink_fault = AI_DOWNLINK_FAULT_NONE;
+    downlink_fault_detail = 0;
+    downlink_fault_event_queued = 0;
     memset(&downlink_pcm_trace, 0, sizeof(downlink_pcm_trace));
     downlink_pcm_trace.nonzero_hash = 0x811c9dc5U;
     downlink_codec_started = 1;
@@ -467,12 +685,20 @@ static uint8_t start_downlink(void)
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
     cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
     audio_play_hw_pa_da_ctl(ENABLE, true);
+    if(cm_discard_codec_input(PLAY_PRE_AUDIO_CODEC_ID, &downlink_rx_overruns))
+    {
+        freeze_downlink_fault(AI_DOWNLINK_FAULT_RX, -1);
+        xSemaphoreGive(downlink_mutex);
+        stop_downlink();
+        mprintf("[DOWNLINK] start failed reason=rx_discard\r\n");
+        return 0;
+    }
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, DISABLE);
     downlink_enabled = 1;
     xSemaphoreGive(downlink_mutex);
     send_state(AI_UART_STATE_DOWNLINK_PLAYING);
     mprintf(
-        "[DOWNLINK] started owner=ai_uart wire=16000/16/stereo-duplicate dac=16000/16/mono queue=blocking aec=armed pa=on\r\n");
+        "[DOWNLINK] started owner=ai_uart wire=16000/16/stereo-duplicate dac=16000/16/mono queue=owned_retry aec=armed pa=on\r\n");
     return 1;
 }
 
@@ -563,6 +789,9 @@ void ai_uart_i2s_handle_timeout(void)
 
 void ai_uart_i2s_handle_command(const ai_uart_i2s_command_t *cmd)
 {
+    /* Consume a frozen stream even if its event was queued behind this command.
+     * The system owner also catches faults inside its synchronous FINISH loop. */
+    ai_uart_i2s_handle_downlink_fault(downlink_generation);
     progress_peer_loss();
     if(link_state == AI_LINK_STOPPING)
     {
@@ -877,6 +1106,9 @@ static void heartbeat_task(void *arg)
 void ai_uart_i2s_protocol_init(void)
 {
     mprintf("[AUDIO_DIAG] version=5 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db output=pa_guarded_hpout ref=peak_frame64 ref_rate=adc\r\n");
+    /* Raw SDK power-on/abnormal-reset classification, not a watchdog diagnosis. */
+    mprintf("[DOWNLINK_GUARD] version=1 rx=owned_copy dac=nonblocking_retry fault_owner=system resetState=%d\r\n",
+        (int)scu_get_system_reset_state());
     BaseType_t task_created;
     send_mutex = xSemaphoreCreateMutex();
     downlink_mutex = xSemaphoreCreateMutex();
