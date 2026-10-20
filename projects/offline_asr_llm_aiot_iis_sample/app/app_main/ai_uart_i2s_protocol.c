@@ -55,7 +55,7 @@
 #define AI_UART_ACK_UNSUPPORTED 0x02
 #define AI_UART_ACK_FAILED 0x03
 
-#include "ci_conversation.generated.h"
+#include "ci_conversation.h"
 
 #define AI_UART_STATE_WAKEUP_WAIT 0x01
 #define AI_UART_STATE_LISTENING 0x02

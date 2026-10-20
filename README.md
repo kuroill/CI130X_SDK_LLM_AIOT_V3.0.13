@@ -226,10 +226,10 @@ if ($LASTEXITCODE -ne 0) { throw "CI build failed; do not use the previous packa
 算法核，仅重编 MCU 不能让它们生效。算法核失败时整个构建失败；必须等待完整构建
 成功，不能把失败后仍留存的旧 `user_code.bin` 当作本次产物。
 
-共享 UART/I2S 生成头文件位于 `components/ci_common/ci_conversation.generated.h`，
-MCU 和 BNPU 都通过现有 `source_file.prj` 搜索此目录。该文件由 `protocols` 生成并
-随 SDK 同步，Windows 构建无需另行手写常量或引用 MCU 应用目录；从旧版本更新时
-须同步新增头文件，并移除旧 `app/app_main/ci_conversation.generated.h`。BNPU 的
+共享 UART/I2S 定义在 SDK 内部的 `components/ci_common/ci_conversation.h`，
+MCU 和 BNPU 都通过现有 `source_file.prj` 搜索此目录，不依赖 `protocols` 或外部
+生成流程。修改时同步检查 ESP 内部的 `src/wire/ci_conversation.rs` 及本地 C
+头文件；两端命令值、状态、租约和 I2S 参数必须一致。BNPU 的
 PWK 与日志覆盖值放在 SDK 默认配置之前，避免头文件包含顺序引起宏重定义，原值
 `USE_PWK=1`、`CONFIG_CI_LOG_UART=0` 保持不变。
 

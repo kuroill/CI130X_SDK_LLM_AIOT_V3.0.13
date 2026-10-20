@@ -1,4 +1,5 @@
-/* Generated from protocols/protos/ci_conversation.proto. DO NOT EDIT. */
+/* Firmware-owned UART/I2S constants. Keep in sync with ESP's local
+ * src/wire/ci_conversation.rs and UART_I2S_PROTOCOL.md. */
 #ifndef LENWELL_CI_CONVERSATION_H
 #define LENWELL_CI_CONVERSATION_H
 #define CI_CONVERSATION_COMMAND_UNSPECIFIED 0U

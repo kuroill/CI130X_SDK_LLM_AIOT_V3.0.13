@@ -477,7 +477,7 @@ static void audio_pre_rslt_report_diagnostics(void) { assert(!in_isr); }
 #define AI_UART_TASK_POLL_MS 50
 typedef int UART_TypeDef;
 '''
-    source += (ROOT / "components/ci_common/ci_conversation.generated.h").read_text()
+    source += (ROOT / "components/ci_common/ci_conversation.h").read_text()
     for line in UART.splitlines():
         if re.match(r"#define AI_UART_(?:MSG_|STATE_|ACK_|HEARTBEAT_MS|PEER_TIMEOUT_MS|FIRMWARE_INFO_INTERVAL_MS)", line):
             source += line + "\n"

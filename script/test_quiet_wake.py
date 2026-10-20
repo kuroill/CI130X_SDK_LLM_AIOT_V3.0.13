@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / "projects/offline_asr_llm_aiot_iis_sample/app/app_main"
 UART = (APP / "ai_uart_i2s_protocol.c").read_text()
 SYSTEM = (APP / "system_msg_deal.c").read_text()
-HEADER = (ROOT / "components/ci_common/ci_conversation.generated.h").read_text()
+HEADER = (ROOT / "components/ci_common/ci_conversation.h").read_text()
 
 
 def main():

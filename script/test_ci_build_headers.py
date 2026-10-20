@@ -44,13 +44,13 @@ class BuildHeadersTest(unittest.TestCase):
 
     def check_audio_header(self, project):
         self.preprocess(project, '''
-#include "ci_conversation.generated.h"
+#include "ci_conversation.h"
 #if CI_AUDIO_SAMPLE_RATE_HZ != 16000 || CI_AUDIO_DATA_BITS != 16 || \
     CI_AUDIO_SLOT_BITS != 32 || CI_AUDIO_CHANNELS != 2 || CI_AUDIO_BCLK_PER_FRAME != 64
 #error CI audio format changed
 #endif
 ''')
-        header = "ci_conversation.generated.h"
+        header = "ci_conversation.h"
         resolved = next((p / header for p in self.include_paths(project)
                          if (p / header).is_file()), None)
         self.assertEqual(resolved, SDK / "components/ci_common" / header)
