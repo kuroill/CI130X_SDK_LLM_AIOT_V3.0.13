@@ -35,6 +35,10 @@
 #define AI_AEC_START_WARN_MS 500
 #define AI_DOWNLINK_PCM_BUFFER_COUNT 4
 #define AI_DOWNLINK_DAC_WAIT_MS 100
+/* Raise the gated HPOUT gain over this many written frames (16 ms each). The
+ * DAC queue still holds up to AI_DOWNLINK_PCM_BUFFER_COUNT earlier silent
+ * frames, so the ramp completes before the first real sample is audible. */
+#define AI_OUTPUT_GATE_RAMP_FRAMES 3
 #define AI_AEC_START_WARN_POLLS \
     ((AI_AEC_START_WARN_MS + AI_UART_TASK_POLL_MS - 1U) / AI_UART_TASK_POLL_MS)
 
@@ -126,6 +130,17 @@ static void freeze_downlink_fault(ai_downlink_fault_t fault, int32_t detail);
 /* All lifecycle/fault fields are protected by downlink_mutex. The system
  * message owner alone starts/stops hardware; the worker may only freeze ingress. */
 static uint32_t downlink_generation;
+/* Downlink output gate, owned under downlink_mutex: CLOSED from START until
+ * the first nonzero PCM frame, RAMPING for AI_OUTPUT_GATE_RAMP_FRAMES writes. */
+typedef enum
+{
+    AI_OUTPUT_GATE_OPEN = 0,
+    AI_OUTPUT_GATE_CLOSED,
+    AI_OUTPUT_GATE_RAMPING,
+} ai_output_gate_state_t;
+static ai_output_gate_state_t downlink_gate_state = AI_OUTPUT_GATE_OPEN;
+static TickType_t downlink_gate_closed_tick;
+static uint32_t downlink_gate_silent_frames;
 static uint32_t downlink_rx_overruns;
 static ai_downlink_fault_t downlink_fault;
 static int32_t downlink_fault_detail;
@@ -280,6 +295,9 @@ static void stop_downlink(void)
     uint32_t stopped_bytes;
     uint32_t stopped_nonzero_samples;
     ai_downlink_pcm_trace_t stopped_trace;
+    ai_output_gate_state_t gate_released_state = AI_OUTPUT_GATE_OPEN;
+    uint32_t gate_released_ms = 0;
+    uint32_t gate_released_silent_frames = 0;
 
     xSemaphoreTake(downlink_mutex, portMAX_DELAY);
     was_active = downlink_enabled || downlink_codec_started;
@@ -297,6 +315,16 @@ static void stop_downlink(void)
         audio_play_hw_pa_da_ctl(DISABLE, true);
 #endif
         cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
+        /* The PA is already off: restoring the configured analog gain is
+         * silent, and local prompts never inherit a closed gate. */
+        if(AI_OUTPUT_GATE_OPEN != downlink_gate_state)
+        {
+            gate_released_state = downlink_gate_state;
+            gate_released_ms = (uint32_t)((xTaskGetTickCount() - downlink_gate_closed_tick) * portTICK_PERIOD_MS);
+            gate_released_silent_frames = downlink_gate_silent_frames;
+        }
+        audio_play_output_gate_release();
+        downlink_gate_state = AI_OUTPUT_GATE_OPEN;
         /* Let the AEC owner drain the acoustic/reference tail and restore ALC.
          * Writing IDLE directly bypasses that cleanup and can leak the speaker
          * tail into the next uplink while CI_SS_AEC_WORK_STATE stays stale. */
@@ -312,6 +340,14 @@ static void stop_downlink(void)
     stopped_trace = downlink_pcm_trace;
     xSemaphoreGive(downlink_mutex);
 
+    if(AI_OUTPUT_GATE_OPEN != gate_released_state)
+    {
+        /* No real audio reached the DAC in this stream (released prearm,
+         * interrupt before speech, or a stop during the ramp). */
+        mprintf("[OUTPUT_GATE] released state=%s held_ms=%lu silent_frames=%lu\r\n",
+            AI_OUTPUT_GATE_CLOSED == gate_released_state ? "closed" : "ramping",
+            (unsigned long)gate_released_ms, (unsigned long)gate_released_silent_frames);
+    }
     if(was_active)
     {
         cm_report_output_diagnostics(PLAY_CODEC_ID, "downlink");
@@ -504,6 +540,11 @@ static uint8_t pump_downlink_once(void)
 {
     uint8_t progressed = 0;
     uint32_t overruns = 0;
+    uint8_t gate_log = 0;
+    uint32_t gate_log_generation = 0;
+    uint32_t gate_log_ms = 0;
+    uint32_t gate_log_silent_frames = 0;
+    int32_t gate_log_percent = 0;
     xSemaphoreTake(downlink_mutex, portMAX_DELAY);
     if(!i2s_rx_ready)
     {
@@ -580,6 +621,38 @@ static uint8_t pump_downlink_once(void)
                     downlink_pending.pcm, downlink_pending.size);
                 if(written > 0)
                 {
+                    if(AI_OUTPUT_GATE_CLOSED == downlink_gate_state)
+                    {
+                        if(downlink_pending.nonzero_samples)
+                        {
+                            /* First real audio: queued silent frames still
+                             * play ahead of it while HPOUT ramps up. */
+                            downlink_gate_state = AI_OUTPUT_GATE_RAMPING;
+                            gate_log = 1;
+                            gate_log_generation = downlink_generation;
+                            gate_log_ms = (uint32_t)((xTaskGetTickCount() - downlink_gate_closed_tick) * portTICK_PERIOD_MS);
+                            gate_log_silent_frames = downlink_gate_silent_frames;
+                        }
+                        else
+                        {
+                            downlink_gate_silent_frames++;
+                        }
+                    }
+                    if(AI_OUTPUT_GATE_RAMPING == downlink_gate_state)
+                    {
+                        int32_t target = audio_play_output_target_percent();
+                        int32_t step = (target + AI_OUTPUT_GATE_RAMP_FRAMES - 1) / AI_OUTPUT_GATE_RAMP_FRAMES;
+                        gate_log_percent = audio_play_output_gate_step(step > 0 ? step : 1);
+                        if(gate_log_percent >= target)
+                        {
+                            downlink_gate_state = AI_OUTPUT_GATE_OPEN;
+                            if(!gate_log)
+                            {
+                                gate_log = 2;
+                                gate_log_generation = downlink_generation;
+                            }
+                        }
+                    }
                     downlink_bytes += downlink_pending.size;
                     downlink_nonzero_samples += downlink_pending.nonzero_samples;
                     downlink_pcm_trace = downlink_pending.trace;
@@ -600,6 +673,17 @@ static uint8_t pump_downlink_once(void)
         }
     }
     xSemaphoreGive(downlink_mutex);
+    if(1 == gate_log)
+    {
+        mprintf("[OUTPUT_GATE] opening generation=%lu held_ms=%lu silent_frames=%lu applied_pct=%ld\r\n",
+            (unsigned long)gate_log_generation, (unsigned long)gate_log_ms,
+            (unsigned long)gate_log_silent_frames, (long)gate_log_percent);
+    }
+    else if(2 == gate_log)
+    {
+        mprintf("[OUTPUT_GATE] open generation=%lu applied_pct=%ld\r\n",
+            (unsigned long)gate_log_generation, (long)gate_log_percent);
+    }
     return progressed;
 }
 
@@ -684,6 +768,13 @@ static uint8_t start_downlink(void)
      * runtime gain before opening HPOUT and accepting ESP audio. */
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
     cm_start_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
+    /* ESP may open playback before reply audio exists. Hold HPOUT at its
+     * -39 dB step so the PA held on digital silence adds no audible floor;
+     * the existing HPOUT -> PA order and settling time are unchanged. */
+    audio_play_output_gate_close();
+    downlink_gate_state = AI_OUTPUT_GATE_CLOSED;
+    downlink_gate_closed_tick = xTaskGetTickCount();
+    downlink_gate_silent_frames = 0;
     audio_play_hw_pa_da_ctl(ENABLE, true);
     if(cm_discard_codec_input(PLAY_PRE_AUDIO_CODEC_ID, &downlink_rx_overruns))
     {
@@ -699,6 +790,9 @@ static uint8_t start_downlink(void)
     send_state(AI_UART_STATE_DOWNLINK_PLAYING);
     mprintf(
         "[DOWNLINK] started owner=ai_uart wire=16000/16/stereo-duplicate dac=16000/16/mono queue=owned_retry aec=armed pa=on\r\n");
+    mprintf("[OUTPUT_GATE] closed generation=%lu hpout=floor target_pct=%ld ramp_frames=%u\r\n",
+        (unsigned long)downlink_generation, (long)audio_play_output_target_percent(),
+        (unsigned int)AI_OUTPUT_GATE_RAMP_FRAMES);
     return 1;
 }
 

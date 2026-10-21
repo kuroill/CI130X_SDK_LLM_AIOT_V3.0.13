@@ -109,6 +109,13 @@ static void task_simple_audio_player(void *pvParameters);
 static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken);
 
 static int32_t g_audio_play_gain = VOLUME_OUTPUT_MAX_PERCENT;
+
+/* AI downlink output gate: while active, the analog DAC/HPOUT gain is capped
+
+ * at g_output_gate_percent so a PA held open for silence adds no audible floor.
+ * Only the downlink owner changes it; local prompts always see it released. */
+static volatile uint8_t g_output_gate_active = 0U;
+static volatile int32_t g_output_gate_percent = 0;
 static volatile uint16_t g_audio_play_pcm_gain_percent = 50U;
 
 /* Local playback and the system downlink owner hand off via SAP_STATE_IDLE.
@@ -240,11 +247,57 @@ void audio_play_set_vol_gain(int32_t gain)
 
 void audio_play_apply_output_gain(void)
 {
-    cm_set_codec_dac_gain(PLAY_CODEC_ID, 0, g_audio_play_gain);
+    int32_t analog = g_audio_play_gain;
+    if(g_output_gate_active && g_output_gate_percent < analog)
+    {
+        analog = g_output_gate_percent;
+    }
+    /* Analog 0 selects the -39 dB HPOUT step. The driver also clears the
+     * digital gain for 0, so the unchanged digital gain is restored below. */
+    cm_set_codec_dac_gain(PLAY_CODEC_ID, 0, analog);
     if(g_audio_play_gain > 0)
     {
         inner_codec_dac_dig_gain_set(PLAYBACK_DAC_DIGITAL_GAIN_DB);
     }
+}
+
+void audio_play_output_gate_close(void)
+{
+    g_output_gate_percent = 0;
+    g_output_gate_active = 1U;
+    audio_play_apply_output_gain();
+}
+
+int32_t audio_play_output_gate_step(int32_t step_percent)
+{
+    int32_t next;
+    if(!g_output_gate_active)
+    {
+        return g_audio_play_gain;
+    }
+    next = g_output_gate_percent + step_percent;
+    if(next >= g_audio_play_gain)
+    {
+        g_output_gate_active = 0U;
+        next = g_audio_play_gain;
+    }
+    g_output_gate_percent = next;
+    audio_play_apply_output_gain();
+    return next;
+}
+
+void audio_play_output_gate_release(void)
+{
+    if(g_output_gate_active)
+    {
+        g_output_gate_active = 0U;
+        audio_play_apply_output_gain();
+    }
+}
+
+int32_t audio_play_output_target_percent(void)
+{
+    return g_audio_play_gain;
 }
 
 void audio_play_set_pcm_gain_percent(uint16_t percent)

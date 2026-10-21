@@ -158,6 +158,7 @@ def worker_fixture():
 #define AI_DOWNLINK_DAC_WAIT_MS 100
 #define AI_DOWNLINK_FINISH_TIMEOUT_MS 1500
 #define AI_DOWNLINK_FINISH_POLL_MS 5
+#define portTICK_PERIOD_MS 1
 static void mprintf(const char *format, ...) { (void)format; }
 typedef uint32_t TickType_t;
 enum { PLAY_PRE_AUDIO_CODEC_ID, PLAY_CODEC_ID, CODEC_OUTPUT, ENABLE, DISABLE,
@@ -212,6 +213,21 @@ static int ciss_get(int key) { return CI_SS_PLAY_STATE_PLAYING; }
 static void ciss_set(int key,int value) { assert(owner_system); }
 static void send_state(int state) { assert(owner_system && !held && !pa_on); }
 static int cm_get_codec_busy_buffer_number(int a,int b) { return busy_buffers; }
+/* Analog output gate model (simple_audio_player.c owns the real registers). */
+static int gate_active, gate_percent, gate_steps, gate_releases;
+static int32_t audio_play_output_target_percent(void) { return 100; }
+static int32_t audio_play_output_gate_step(int32_t step) {
+    assert(held && gate_active && pa_on);
+    ++gate_steps;
+    gate_percent += step;
+    if (gate_percent >= 100) { gate_percent = 100; gate_active = 0; }
+    return gate_percent;
+}
+static void audio_play_output_gate_release(void) {
+    assert(owner_system && held && !pa_on); /* Restored only behind a closed PA. */
+    if (gate_active) ++gate_releases;
+    gate_active = 0;
+}
 void ai_uart_i2s_handle_downlink_fault(uint32_t generation);
 static int send_msg_to_sys_task(sys_msg_t *event,void *w) {
     assert(!held && event->msg_type==SYS_MSG_TYPE_AI_DOWNLINK_FAULT);
@@ -223,13 +239,20 @@ static int send_msg_to_sys_task(sys_msg_t *event,void *w) {
     return 1;
 }
 '''
-    for name in ("ai_downlink_pcm_trace_t", "ai_downlink_fault_t", "ai_downlink_pending_t"):
+    ramp = re.search(r"(?m)^#define\s+AI_OUTPUT_GATE_RAMP_FRAMES\s+([0-9]+)", UART)
+    assert ramp
+    source += f"#define AI_OUTPUT_GATE_RAMP_FRAMES {ramp[1]}\n"
+    for name in ("ai_downlink_pcm_trace_t", "ai_downlink_fault_t", "ai_downlink_pending_t",
+                 "ai_output_gate_state_t"):
         source += ctype(UART, name)
     source += r'''
 static ai_downlink_pcm_trace_t downlink_pcm_trace;
 static ai_downlink_fault_t downlink_fault;
 static ai_downlink_pending_t downlink_pending;
 static int16_t downlink_input_copy[512];
+static ai_output_gate_state_t downlink_gate_state;
+static TickType_t downlink_gate_closed_tick;
+static uint32_t downlink_gate_silent_frames;
 '''
     for name in ("report_downlink_fault", "stop_downlink", "freeze_downlink_fault",
                  "finish_downlink", "copy_downlink_pcm_with_trace",
@@ -309,6 +332,27 @@ int main(void) {
     epoch(); available=1; write_result=0; now=UINT32_MAX-50;
     pump_downlink_once(); now=50;
     assert(!pump_downlink_once() && downlink_fault==AI_DOWNLINK_FAULT_DAC_TIMEOUT);
+    /* Output gate: digital silence never opens HPOUT; the first real frame
+     * ramps it over AI_OUTPUT_GATE_RAMP_FRAMES writes, then it stays open. */
+    epoch(); memset(rx,0,sizeof(rx));
+    downlink_gate_state=AI_OUTPUT_GATE_CLOSED; downlink_gate_silent_frames=0;
+    gate_active=1; gate_percent=0; gate_steps=gate_releases=0;
+    for(int frame=0; frame<5; ++frame) { available=1; assert(pump_downlink_once()); }
+    assert(downlink_gate_state==AI_OUTPUT_GATE_CLOSED && gate_active && !gate_steps);
+    assert(downlink_gate_silent_frames==5 && !downlink_nonzero_samples);
+    rx[0]=rx[1]=3; available=1; assert(pump_downlink_once());
+    assert(downlink_gate_state==AI_OUTPUT_GATE_RAMPING && gate_steps==1 && gate_percent<100);
+    for(int frame=1; frame<AI_OUTPUT_GATE_RAMP_FRAMES; ++frame) { available=1; assert(pump_downlink_once()); }
+    assert(downlink_gate_state==AI_OUTPUT_GATE_OPEN && !gate_active && gate_percent==100);
+    assert(gate_steps==AI_OUTPUT_GATE_RAMP_FRAMES);
+    memset(rx,0,sizeof(rx)); available=1; assert(pump_downlink_once());
+    assert(downlink_gate_state==AI_OUTPUT_GATE_OPEN && gate_steps==AI_OUTPUT_GATE_RAMP_FRAMES);
+    /* A stream stopped before any reply audio releases the gate behind the PA. */
+    epoch(); memset(rx,0,sizeof(rx));
+    downlink_gate_state=AI_OUTPUT_GATE_CLOSED; gate_active=1; gate_percent=0; gate_releases=0;
+    available=1; assert(pump_downlink_once());
+    owner_system=1; stop_downlink(); owner_system=0;
+    assert(downlink_gate_state==AI_OUTPUT_GATE_OPEN && !gate_active && gate_releases==1);
     puts("owned PCM worker: retry integrity, STOP/START epoch isolation, system-only faults, queue retry/preemption, sticky FINISH failure, idle drain, overruns and tick wrap passed");
 }
 '''

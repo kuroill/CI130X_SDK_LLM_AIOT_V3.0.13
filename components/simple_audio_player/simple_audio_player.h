@@ -139,6 +139,19 @@ void audio_play_set_vol_gain(int32_t gain);
 /** Reapply the current hardware and DAC digital gain after codec restart. */
 void audio_play_apply_output_gain(void);
 
+/** Hold the analog DAC/HPOUT gain at its -39 dB floor until real audio. */
+void audio_play_output_gate_close(void);
+
+/** Raise the gated analog gain by step_percent; returns the applied percent.
+ *  The gate releases itself once the configured output gain is reached. */
+int32_t audio_play_output_gate_step(int32_t step_percent);
+
+/** Release the gate immediately (after the PA is already off). */
+void audio_play_output_gate_release(void);
+
+/** Configured analog output gain percent (0..100) the gate ramps toward. */
+int32_t audio_play_output_target_percent(void);
+
 /** Set the ESP volume level used only for locally decoded prompt PCM. */
 void audio_play_set_pcm_gain_percent(uint16_t percent);
 

@@ -144,6 +144,20 @@ static void audio_play_apply_output_gain(void) {
     if (downlink_starting) assert(input_muted);
     ++gain_applications;
 }
+/* Output gate model: it may change only while the PA is off, so neither the
+ * floor nor the restored gain can produce an audible analog step. */
+static int output_gate_closed, output_gate_closes, output_gate_releases;
+static void audio_play_output_gate_close(void) {
+    assert(!pa_enabled() && held);
+    output_gate_closed = 1;
+    ++output_gate_closes;
+}
+static void audio_play_output_gate_release(void) {
+    assert(!pa_enabled());
+    if (output_gate_closed) ++output_gate_releases;
+    output_gate_closed = 0;
+}
+static int32_t audio_play_output_target_percent(void) { return 100; }
 static void send_state(int state) {
     assert(state == AI_UART_STATE_DOWNLINK_PLAYING);
     assert(!held && pa_enabled() && !hpout_muted() && !input_muted);
@@ -180,6 +194,7 @@ static void resume_asr(void) { }
         (UART, "AI_DOWNLINK_PCM_BUFFER_COUNT"),
         (UART, "AI_DOWNLINK_FINISH_TIMEOUT_MS"),
         (UART, "AI_DOWNLINK_FINISH_POLL_MS"),
+        (UART, "AI_OUTPUT_GATE_RAMP_FRAMES"),
     ):
         constants += f"#define {name} {define(text, name)}U\n"
     source = constants + source
@@ -187,6 +202,13 @@ static void resume_asr(void) { }
     fault_type = re.search(r"typedef enum\s*\{[^}]*\}\s*ai_downlink_fault_t;", UART)
     assert fault_type
     source += fault_type.group() + "\nstatic ai_downlink_fault_t downlink_fault;\n"
+    gate_type = re.search(r"typedef enum\s*\{[^}]*\}\s*ai_output_gate_state_t;", UART)
+    assert gate_type
+    source += gate_type.group() + (
+        "\nstatic ai_output_gate_state_t downlink_gate_state;"
+        "\nstatic TickType_t downlink_gate_closed_tick;"
+        "\nstatic uint32_t downlink_gate_silent_frames;\n"
+    )
     source += function(UART, "report_downlink_fault")
     source += function(UART, "freeze_downlink_fault")
     pa_type = re.search(r"typedef enum\s*\{[^}]*\}\s*audio_pa_state_t;", PLAYER)
@@ -257,6 +279,8 @@ static void reset(int active_level) {
     downlink_fault_detail = discard_error = 0;
     i2s_rx_ready = 1;
     play_state = 0;
+    output_gate_closed = output_gate_closes = output_gate_releases = 0;
+    downlink_gate_state = AI_OUTPUT_GATE_OPEN;
     now = 0;
     hpout_opened_at = pa_disabled_at = 0;
 }
@@ -270,6 +294,8 @@ static void begin_downlink(void) {
     downlink_starting = 0;
     assert(downlink_codec_started && downlink_enabled);
     assert(pa_enabled() && !hpout_muted() && !input_muted);
+    /* No reply audio yet: HPOUT stays at its floor behind the open PA. */
+    assert(output_gate_closed && downlink_gate_state == AI_OUTPUT_GATE_CLOSED);
     assert_gain_and_capture_unchanged();
 }
 static void test_polarity(int active_level) {
@@ -291,11 +317,16 @@ static void test_polarity(int active_level) {
         assert(!pa_enabled() && hpout_muted() && input_muted);
         assert(!downlink_codec_started && !downlink_enabled);
         assert(play_state == CI_SS_PLAY_STATE_PLAYING_TO_IDLE);
+        assert(!output_gate_closed && downlink_gate_state == AI_OUTPUT_GATE_OPEN);
         assert_gain_and_capture_unchanged();
     }
     begin_downlink();
     stop_downlink(); /* User interruption/peer loss uses the same cleanup. */
     assert(!pa_enabled() && hpout_muted());
+    /* Every stream releases the gate after the PA is off, so the later local
+     * prompt below plays at the configured gain. */
+    assert(!output_gate_closed && downlink_gate_state == AI_OUTPUT_GATE_OPEN);
+    assert(output_gate_closes == output_gate_releases);
     assert_gain_and_capture_unchanged();
 
     /* An old STOP must not cut the next wake ding or touch its codec. */
@@ -359,6 +390,8 @@ static void test_failures(void) {
     discard_error = -1;
     assert(!start_downlink());
     assert(!pa_enabled() && hpout_muted() && !downlink_codec_started);
+    /* A failed START cannot leave the next prompt gated. */
+    assert(!output_gate_closed && downlink_gate_state == AI_OUTPUT_GATE_OPEN);
 }
 int main(void) {
     assert(!board_callbacks.codec_start && !board_callbacks.codec_stop);
