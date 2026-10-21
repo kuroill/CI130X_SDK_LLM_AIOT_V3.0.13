@@ -56,6 +56,14 @@ chipintelli提供的部分开发板和模组，可以通过下面的宏选择，
 
 #define MIC_DIFF_SINGLE                 0   /*1,单端。0，差分（通用模块都是差分模式，省成本的模块为单端(MICN_L 接GND)时，需要配置为SINGLE）)*/
 #define REF_DIFF_SINGLE                 1   /*1,单端。0，差分（D类功放是采用单mic aec 使用 差分 mic ; AB类功放是采用单mic aec 使用 单端 mic)*/
+/* AEC 参考回采电路板型（仅内部 codec 右路单端 REF 时生效）：
+ * 1 = MN-WF-0153 量产板：SPK+ 经 180K/4.7K 分压（约 -32dB）进 MICPR，比官方 AB 类
+ *     参考电路（22K/2.2K，约 -21dB）弱 11dB，REF 使用官方 V3.0.13 增益基线
+ *     （前级 12dB、AEC 期 PGA 4dB、数字 +6dB）。功放先于 REF ADC 饱和，不会削顶。
+ * 0 = 现有开发板：参考取样更强，REF 前级/PGA 0dB、数字 +1dB 防止削顶。 */
+#ifndef LENWELL_AEC_REF_WF0153
+#define LENWELL_AEC_REF_WF0153          1
+#endif
 
 /*1、双mic + aec算法必须外部挂codec作为信号回采(推荐7243e)
   2、双dmic + 模拟右麦/外部挂codec(推荐7243e)作为信号回采

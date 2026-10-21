@@ -447,11 +447,15 @@ const cm_codec_hw_info_t host_mic_hw_info =
     .codec_gain.codec_adc_mic_amp_l = INNER_CODEC_MIC_AMP_12dB,
 #if USE_AEC_MODULE && !IF_USE_ANOTHER_CODEC_TO_GET_REF && !MIC_RECORD_IIS_SELECT
     /* Right ADC is the divided PA reference, not a second microphone.
-     * Field windows reached 56.6% full-scale samples with the 12 dB MIC
-     * preamp still enabled even though AEC's REF PGA was already 0 dB.
-     * Remove that analog boost before conversion; digital attenuation cannot
-     * restore a clipped reference. MIC sensitivity and DAC gain stay intact. */
+     * WF0153 divides SPK+ by 180K/4.7K, 11 dB below the vendor AB reference
+     * circuit; without the V3.0.13 12 dB front end its REF sat ~26 dB below
+     * the echo and AEC removed nothing. The development board's stronger
+     * reference clipped with that front end, so it keeps unity gain. */
+#if LENWELL_AEC_REF_WF0153
+    .codec_gain.codec_adc_mic_amp_r = INNER_CODEC_MIC_AMP_12dB,
+#else
     .codec_gain.codec_adc_mic_amp_r = INNER_CODEC_MIC_AMP_0dB,
+#endif
     .codec_gain.pga_gain_r = 0.0f,
 #else
     .codec_gain.codec_adc_mic_amp_r = INNER_CODEC_MIC_AMP_12dB,
@@ -472,9 +476,13 @@ const cm_codec_hw_info_t host_mic_hw_info =
     .codec_gain.dig_gain_l = 6.0f,//数字增益配置，该值加/减 1 ,数字增益加/减 1dB
 #endif 
 #if USE_AEC_MODULE
-    /* This product keeps the validated CI-D06GT01D analog REF circuit. Do not
-     * add the V3 generic single-ended +6 dB digital boost on the right ADC. */
+    /* WF0153 restores the V3 single-ended REF digital gain; the development
+     * board's stronger reference keeps +1 dB. */
+#if LENWELL_AEC_REF_WF0153 && !IF_USE_ANOTHER_CODEC_TO_GET_REF && !MIC_RECORD_IIS_SELECT
+    .codec_gain.dig_gain_r = 6.0f,
+#else
     .codec_gain.dig_gain_r = 1.0f,
+#endif
 #else
 #if (MIC_DIFF_SINGLE == 0)
     .codec_gain.dig_gain_r = 1.0f,

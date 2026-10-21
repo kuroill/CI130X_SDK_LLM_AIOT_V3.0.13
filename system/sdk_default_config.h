@@ -840,6 +840,10 @@
 #define MIC_DIFF_SINGLE                     0              //1，单端。0，差分（通用模块都是差分模式，省成本的模块为单端（MICN_L 接GND）时，需要配置为SINGLE）
 #endif
 
+#ifndef LENWELL_AEC_REF_WF0153
+#define LENWELL_AEC_REF_WF0153              1              //AEC参考回采板型：1，MN-WF-0153量产板；0，开发板。项目user_config.h优先
+#endif
+
 #define OTA_STA_UPDATE              0xFC                  //不可修改
 #define OTA_STA_FINISH              0xF0                  //不可修改
 

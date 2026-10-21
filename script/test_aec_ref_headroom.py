@@ -23,7 +23,7 @@ def declaration(kind, name):
     return match.group() + "\n"
 
 
-def fixture(aec, external_ref, external_mic, auto_gain):
+def fixture(aec, external_ref, external_mic, auto_gain, wf0153):
     host = BOARD.index("const cm_codec_hw_info_t host_mic_hw_info")
     # Preserve the production preprocessor branches, rather than copying gains.
     start = BOARD.index("#if (MIC_DIFF_SINGLE == 0)", host)
@@ -38,6 +38,7 @@ def fixture(aec, external_ref, external_mic, auto_gain):
 #define IF_USE_ANOTHER_CODEC_TO_GET_REF {external_ref}
 #define MIC_RECORD_IIS_SELECT {external_mic}
 #define AUTO_GET_AEC_GAIN {auto_gain}
+#define LENWELL_AEC_REF_WF0153 {wf0153}
 #define MIC_DIFF_SINGLE 0
 #define REF_DIFF_SINGLE 1
 '''
@@ -66,8 +67,12 @@ int main(void) {
     assert(capture.codec_adc_input_mode_l == INNER_CODEC_INPUT_MODE_DIFF);
     assert(capture.codec_adc_mic_amp_l == INNER_CODEC_MIC_AMP_12dB);
     assert(capture.pga_gain_l == (AUTO_GET_AEC_GAIN ? 20.0f : 28.5f));
-    assert(capture.dig_gain_l == 1.0f && capture.dig_gain_r == 1.0f);
-    assert(capture.codec_adc_mic_amp_r == (right_is_ref ? INNER_CODEC_MIC_AMP_0dB : INNER_CODEC_MIC_AMP_12dB));
+    /* WF0153 REF restores the V3.0.13 single-ended baseline; the development
+     * board REF keeps unity analog gain. Non-REF right channels are unchanged. */
+    bool wf0153_ref = right_is_ref && LENWELL_AEC_REF_WF0153;
+    assert(capture.dig_gain_l == 1.0f);
+    assert(capture.dig_gain_r == (wf0153_ref ? 6.0f : 1.0f));
+    assert(capture.codec_adc_mic_amp_r == (right_is_ref && !wf0153_ref ? INNER_CODEC_MIC_AMP_0dB : INNER_CODEC_MIC_AMP_12dB));
     assert(capture.pga_gain_r == (right_is_ref || AUTO_GET_AEC_GAIN ? 0.0f : 28.5f));
     codec.reg6 = 255; codec.reg2d = 31;
     inner_codec_adc_enable(&capture);
@@ -76,18 +81,23 @@ int main(void) {
     assert((codec.pga_gain_reg[0] >> 5) == INNER_CODEC_MIC_AMP_12dB);
     assert((codec.pga_gain_reg[1] >> 5) == capture.codec_adc_mic_amp_r);
     if (right_is_ref) {
-        assert(codec.pga_gain_reg[1] == 0x0c); /* Unity front end and PGA from initialization. */
+        /* Front end from the board, 0 dB PGA (0x0c) from initialization. */
+        uint32_t ref_idle = wf0153_ref ? 0x6c : 0x0c;
+        /* AEC playback PGA: WF0153 4 dB -> 3 dB step (0x0e), development 0 dB. */
+        uint32_t ref_playing = wf0153_ref ? 0x6e : 0x0c;
+        assert(codec.pga_gain_reg[1] == ref_idle);
         for (int cycle = 0; cycle < 200; ++cycle) {
             inner_codec_set_pga_gain(INNER_CODEC_LEFT_CHA, 8);
-            inner_codec_set_pga_gain(INNER_CODEC_RIGHT_CHA, 0);
+            inner_codec_set_pga_gain(INNER_CODEC_RIGHT_CHA, wf0153_ref ? 4 : 0);
             assert(codec.pga_gain_reg[0] == 0x71); /* Existing playback MIC sensitivity. */
-            assert(codec.pga_gain_reg[1] == 0x0c); /* PGA writes cannot restore the MIC boost. */
+            assert(codec.pga_gain_reg[1] == ref_playing); /* PGA writes keep the board front end. */
             inner_codec_set_pga_gain(INNER_CODEC_LEFT_CHA, 20);
             assert(codec.pga_gain_reg[0] == 0x79); /* Existing idle MIC sensitivity. */
-            assert(codec.pga_gain_reg[1] == 0x0c);
+            assert(codec.pga_gain_reg[1] == ref_playing);
         }
     }
-    assert(codec.adc_dig_gain_reg[0] == 199 && codec.adc_dig_gain_reg[1] == 199);
+    assert(codec.adc_dig_gain_reg[0] == 199);
+    assert(codec.adc_dig_gain_reg[1] == (wf0153_ref ? 209 : 199));
     assert(codec.reg6 == 255 && codec.reg2d == 31); /* Capture settings never change DAC output. */
 }
 '''
@@ -98,9 +108,10 @@ def main():
     for aec in (0, 1):
         for external_ref, external_mic in ((0, 0), (1, 0), (0, 1)):
             for auto_gain in (0, 1):
-                name = f"ref_headroom_{aec}_{external_ref}_{external_mic}_{auto_gain}"
-                run_fixture(name, fixture(aec, external_ref, external_mic, auto_gain))
-    print("REF analog gain: 12 board configurations, real ADC/PGA writes and 200 playback cycles passed; MIC, digital gains and DAC preserved.")
+                for wf0153 in (0, 1):
+                    name = f"ref_headroom_{aec}_{external_ref}_{external_mic}_{auto_gain}_{wf0153}"
+                    run_fixture(name, fixture(aec, external_ref, external_mic, auto_gain, wf0153))
+    print("REF analog gain: 24 board configurations (WF0153/dev), real ADC/PGA writes and 200 playback cycles passed; MIC and DAC preserved.")
     print("Host source checks only; REF clipping, acoustic noise and human barge-in need hardware validation.")
 
 

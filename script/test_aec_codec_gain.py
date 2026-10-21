@@ -19,7 +19,7 @@ CONFIG = (
 ).read_text()
 
 
-def fixture(dual, external_ref, inner_ref, external_mic):
+def fixture(dual, external_ref, inner_ref, external_mic, wf0153):
     # Use the production enum, config type, and selected project's initializer.
     state = re.search(
         r"typedef enum\s*\{[^}]*\}\s*ci_ss_aec_alc_state;", STATUS
@@ -37,6 +37,8 @@ def fixture(dual, external_ref, inner_ref, external_mic):
 #define IF_USE_ANOTHER_CODEC_TO_GET_REF {external_ref}
 #define REF_IN_FROM_INNER_CODEC {inner_ref}
 #define MIC_RECORD_IIS_SELECT {external_mic}
+#define LENWELL_AEC_REF_WF0153 {wf0153}
+#define REF_GAIN (LENWELL_AEC_REF_WF0153 ? 4 : 0)
 #define HOST_MIC_RECORD_CODEC_ID 1
 #define mprintf(...) ((void)0)
 '''
@@ -109,7 +111,7 @@ static void reset(int left_alc, int right_alc, int right_gain) {
 
 static void assert_playing(bool right_is_ref) {
     assert(gain[0] == 8);
-    assert(gain[1] == (right_is_ref ? 0 : 8));
+    assert(gain[1] == (right_is_ref ? REF_GAIN : 8));
     assert(alc[0] == DISABLE && alc[1] == DISABLE);
 }
 
@@ -118,7 +120,7 @@ static void assert_stopped(bool right_is_ref, bool was_enabled) {
     assert(alc[0] == was_enabled);
     if (right_is_ref) {
         /* REF never inherits MIC's idle gain or an enabled ALC. */
-        assert(gain[1] == 0 && alc[1] == DISABLE);
+        assert(gain[1] == REF_GAIN && alc[1] == DISABLE);
     } else if (OFFLINE_DUAL_MIC_ALG_SUPPORT) {
         assert(gain[1] == 20 && alc[1] == was_enabled);
     } else {
@@ -141,7 +143,7 @@ static void test_direct_controls(bool right_is_ref) {
 }
 
 static void test_cycle(bool right_is_ref, bool was_enabled) {
-    reset(was_enabled, right_is_ref ? DISABLE : was_enabled, right_is_ref ? 0 : 20);
+    reset(was_enabled, right_is_ref ? DISABLE : was_enabled, right_is_ref ? REF_GAIN : 20);
     assert(aec_start_alc_process() == was_enabled);
     assert(query_count == 1);
     assert(alc_state == (was_enabled ? CI_SS_AEC_ALC_CLOSED_TO_OPEN : CI_SS_AEC_ALC_CLOSED));
@@ -190,7 +192,7 @@ static void test_topology(int microphones, int references, bool right_is_ref) {
 
 int main(void) {
     assert(aec_config.alc_off_codec_adc_gain_mic == 8);
-    assert(aec_config.alc_off_codec_adc_gain_ref == 0);
+    assert(aec_config.alc_off_codec_adc_gain_ref == REF_GAIN);
 '''
     # Expected physical topology is independent of the algorithm-buffer flag.
     expected_internal_ref = not (external_ref or inner_ref or external_mic)
@@ -217,7 +219,8 @@ def main():
             ("inner_ref", (0, 1, 0)),
             ("external_mic", (0, 0, 1)),
         ):
-            run_fixture(f"aec_gain_dual{dual}_{topology}", fixture(dual, *flags))
+            for wf0153 in (0, 1):
+                run_fixture(f"aec_gain_dual{dual}_{topology}_wf{wf0153}", fixture(dual, *flags, wf0153))
     print("Host source regression only: existing BNPU archives and hardware AEC remain unverified.")
 
 

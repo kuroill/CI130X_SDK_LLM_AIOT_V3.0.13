@@ -1199,7 +1199,11 @@ static void heartbeat_task(void *arg)
 
 void ai_uart_i2s_protocol_init(void)
 {
-    mprintf("[AUDIO_DIAG] version=5 aec=windowed_task_logs dma=scheduled_blocks gain=ref_frontend_0db output=pa_guarded_hpout ref=peak_frame64 ref_rate=adc\r\n");
+#if LENWELL_AEC_REF_WF0153
+    mprintf("[AUDIO_DIAG] version=6 aec=windowed_task_logs dma=scheduled_blocks ref_board=wf0153 ref_gain=front12db_aecpga4db_dig6db output=pa_guarded_hpout ref=peak_frame64 ref_rate=adc\r\n");
+#else
+    mprintf("[AUDIO_DIAG] version=6 aec=windowed_task_logs dma=scheduled_blocks ref_board=dev ref_gain=front0db_aecpga0db_dig1db output=pa_guarded_hpout ref=peak_frame64 ref_rate=adc\r\n");
+#endif
     /* Raw SDK power-on/abnormal-reset classification, not a watchdog diagnosis. */
     mprintf("[DOWNLINK_GUARD] version=1 rx=owned_copy dac=nonblocking_retry fault_owner=system resetState=%d\r\n",
         (int)scu_get_system_reset_state());

@@ -179,6 +179,34 @@ DMA；自然 FINISH 仍先等待音频播完。组合提示音保持 PA/HPOUT �
 python3 script/test_pa_idle_mute.py
 ```
 
+## WF0153 样板 AEC 参考增益（2026-10-22）
+
+MN-WF-0153 量产板的 AEC 参考取自 SPK+，经 R2 180K / R1 4.7K（约 −32dB）、C25
+进 MICPR，MICNR 悬空（与官方 AB 类参考电路一致），但分压比官方 22K/2.2K 弱
+11dB。下节开发板调参后的 REF（前级 0dB、AEC 期 PGA 0dB、数字 +1dB）在样板上
+只剩约 −30dBFS：BF24 在 10–15% 音量播放期 `micAbs≈2000–3400`、
+`refAbs≈100–180`、`dstAbs≈micAbs`（AEC 消除量约 0dB），ASR 把自身回复识别为
+用户话语。开发板同固件 mic/ref 约 1:1，消除量 30dB 以上。
+
+`LENWELL_AEC_REF_WF0153`（`user_config.h`，`sdk_default_config.h` 同默认值 1）
+选择板型：1 为量产 0153，REF 恢复 V3.0.13 基线（前级 12dB、AEC 期 PGA 4dB 即
+3dB 档、数字 +6dB），比上一版高约 20dB；0 为开发板，保持原值。MIC 增益、AEC
+算法参数、DAC/音量、IIS/DMA、协议和打断策略不变。样板功放先于 REF ADC 饱和，
+最强播放时 REF 峰值约 780×10≈8000，不会削顶；开发板若要使用必须改为 0。
+
+刷入后启动日志应为：
+
+```text
+[AUDIO_DIAG] version=6 ... ref_board=wf0153 ref_gain=front12db_aecpga4db_dig6db ...
+```
+
+播放窗口的 `[AUDIO_GAIN]` 应为 `refPgaReg=0x6e`（空闲 0x6c），MIC 仍为
+`0x71/0x79`。BF24 验收：10%、60%、90% 音量各问长回复，播放进入稳定后
+`[AEC_PATH]` 中 `refAbs` 与 `micAbs` 同一量级、`dstAbs` 明显低于 `micAbs`
+（目标 20dB 以上），`refClipPermille=0`；服务端不再出现无人说话的 `[BARGE]
+confirmed` 和自身回复被识别为 ASR final；近、远距离真人插话仍能打断。若 ref 仍
+远低于 mic 或消除量仍接近 0dB，需排查结构密封与 MIC 削顶，不能宣布已修复。
+
 ## REF 削顶、自回声与播放杂音（2026-10-19）
 
 当前实现将实际板上右 ADC 的模拟 REF 前级从 12dB 改为 0dB，并将初始 REF
