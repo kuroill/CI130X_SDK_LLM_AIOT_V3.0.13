@@ -116,6 +116,7 @@ static int32_t g_audio_play_gain = VOLUME_OUTPUT_MAX_PERCENT;
  * Only the downlink owner changes it; local prompts always see it released. */
 static volatile uint8_t g_output_gate_active = 0U;
 static volatile int32_t g_output_gate_percent = 0;
+static volatile uint16_t g_audio_play_user_percent = 50U;
 static volatile uint16_t g_audio_play_pcm_gain_percent = 50U;
 
 /* Local playback and the system downlink owner hand off via SAP_STATE_IDLE.
@@ -128,8 +129,13 @@ typedef enum
 }audio_pa_state_t;
 static audio_pa_state_t audio_pa_state = AUDIO_PA_STATE_UNKNOWN;
 
-/* Dialogue PCM amplitude is user_percent / 250; the request owns its ratio. */
+/* Dialogue PCM amplitude is level(user_percent) / 250; the request owns its
+ * ratio. The level curve matches the ESP (config::speaker_volume_pcm_level):
+ * up to 60% the level equals the percent, 60..100% rise to 78 so full-scale
+ * PCM plus the +10 dB DAC digital gain stays below clipping. */
 #define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 25000
+#define ESP_VOLUME_LINEAR_LIMIT_PERCENT 60U
+#define ESP_VOLUME_MAX_PCM_LEVEL 78U
 
 #if (PLAYBACK_DAC_DIGITAL_GAIN_DB < -117) || (PLAYBACK_DAC_DIGITAL_GAIN_DB > 10)
 #error "PLAYBACK_DAC_DIGITAL_GAIN_DB must be in the CI1306 DAC range [-117, 10] dB"
@@ -310,7 +316,16 @@ void audio_play_set_pcm_gain_percent(uint16_t percent)
     {
         percent = 100U;
     }
-    g_audio_play_pcm_gain_percent = percent;
+    uint16_t level = percent;
+    if(percent > ESP_VOLUME_LINEAR_LIMIT_PERCENT)
+    {
+        level = (uint16_t)(ESP_VOLUME_LINEAR_LIMIT_PERCENT +
+            ((percent - ESP_VOLUME_LINEAR_LIMIT_PERCENT) *
+             (ESP_VOLUME_MAX_PCM_LEVEL - ESP_VOLUME_LINEAR_LIMIT_PERCENT)) /
+            (100U - ESP_VOLUME_LINEAR_LIMIT_PERCENT));
+    }
+    g_audio_play_user_percent = percent;
+    g_audio_play_pcm_gain_percent = level;
 }
 
 static void audio_play_apply_local_pcm_gain(void *pcm_buf, uint32_t buf_size)
@@ -447,7 +462,8 @@ static int sap_start_play_inner(sap_msg_t *msg)
         // sap_info.data_addr = msg->data_addr;
         sap_info.play_end_callback = msg->play_end_callback;
         sap_info.gain_ratio_percent = msg->gain_ratio_percent;
-        mprintf("[AUDIO] local playback volume userPercent=%u gainRatioPercent=%u pcmGainPermille=%u\r\n",
+        mprintf("[AUDIO] local playback volume userPercent=%u pcmLevel=%u gainRatioPercent=%u pcmGainPermille=%u\r\n",
+            (unsigned int)g_audio_play_user_percent,
             (unsigned int)g_audio_play_pcm_gain_percent,
             (unsigned int)sap_info.gain_ratio_percent,
             ((unsigned int)g_audio_play_pcm_gain_percent * sap_info.gain_ratio_percent) / 25U);

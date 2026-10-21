@@ -152,7 +152,8 @@ void audio_play_output_gate_release(void);
 /** Configured analog output gain percent (0..100) the gate ramps toward. */
 int32_t audio_play_output_target_percent(void);
 
-/** Set the ESP volume level used only for locally decoded prompt PCM. */
+/** Set the ESP user volume percent; locally decoded prompt PCM uses its
+ * curve-mapped level, matching the ESP dialogue PCM. */
 void audio_play_set_pcm_gain_percent(uint16_t percent);
 
 /**
