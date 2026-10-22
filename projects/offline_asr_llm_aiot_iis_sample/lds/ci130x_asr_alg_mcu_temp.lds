@@ -44,7 +44,11 @@ SHARE_SRAM_SIZE            = 0x400;
 SRAM_START_ADDR            = 0x1ff51000;
 SRAM_END_ADDR              = @@SDK_ALG_PRO_SRAM_HOST_END_ADDR@@;
 SRAM_SIZE                  = (SRAM_END_ADDR - SRAM_START_ADDR);
-SYS_HEAP_SIZE              = (1024*150);
+/* FreeRTOS heap. 2026-10-22 BF24: its lifetime minimum free was ~35 KiB
+ * while newlib malloc (ASR + ROM MP3 prompt decoder, the SRAM left after
+ * this heap) had ~11 KiB on the first wake, so the first ding could not
+ * allocate its decoder. 16 KiB moved to newlib; recheck both minimums. */
+SYS_HEAP_SIZE              = (1024*134);
 
 /* ASSERT((SRAM_END_ADDR - SRAM_START_ADDR) == (ROM_SIZE + FHEAP_SIZE + ASR_USED_SIZE + RAM_SIZE), "RAM config error!"); */
 
