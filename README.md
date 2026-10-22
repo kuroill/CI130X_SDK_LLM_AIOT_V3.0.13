@@ -56,7 +56,7 @@ python3 -B script/test_downlink_pcm_ownership.py
 python3 -B script/test_downlink_pcm_trace.py
 python3 -B script/test_pa_idle_mute.py
 python3 -B script/test_iis_peer_recovery.py
-python3 -B script/test_quiet_wake.py
+python3 -B script/test_wake_ding.py
 python3 -B script/test_ci_build_headers.py
 ```
 
@@ -64,19 +64,15 @@ ownership 回归执行实际 C 函数，覆盖同帧等待后继续播放、旧 
 故障事件队列满与同步消费、DAC buffer 借还、接收环溢出及失败 FINISH 重试；
 模拟不包含真实 DMA 与模拟电路。
 
-## 夜间静音唤醒
+## 唤醒提示音
 
-夜间静音唤醒新增生成契约 `0x2A SET_WAKE_PROMPT_POLICY`（0=normal、1=quiet-night）。
-ESP 用控制板确认的静音值和设备本地 21:00–06:00 判定，每秒经 UART owner 续约；
-CI 仅保存五秒 RAM 租约，peer loss 清除，退出对话不清除，音量/I2S/AEC 不变。
-实际静音的唤醒只发送 `0x1A QUIET_WAKE_DETECTED`（原 wake_id:u16le），不发
-`0x10` 或假的 DING_DONE；仍恢复识别、执行唤醒 hook、打断旧播放。ESP 把实际
-quiet 标记上云，由 IoT 播一次当前语言“我在”。发布需 IoT → CI → ESP，旧 ESP
-不下发此策略，因此新 CI 默认仍是普通唤醒行为。
+每次唤醒都发送 `0x10 WAKE_DETECTED` 并播放 ding；仅在 ESP 续约的对话租约
+（`SET_CONVERSATION_STATE` active/waiting）有效时跳过 ding，仍打断旧播放、恢复识别，
+不伪造 DING_DONE。原夜间静音唤醒（`0x2A SET_WAKE_PROMPT_POLICY`、
+`0x1A QUIET_WAKE_DETECTED`）已于 2026-10-22 移除，类型值保留不复用；旧 ESP 若仍发送
+`0x2A`，CI 按未知命令回 UNSUPPORTED，因此需先升级 ESP 再升级 CI。
 
-`python3 script/test_quiet_wake.py`、`python3 script/test_iis_peer_recovery.py`
-只做实际 C 函数的主机回归，不是正式固件构建。正式打包仍需 Windows；三语、
-静音/非静音、21:00/06:00、peer 掉线恢复及声音测试见 ESP README。
+`python3 -B script/test_wake_ding.py` 只做实际 C 函数的主机回归，不是正式固件构建。
 
 ## SDK目录结构
 

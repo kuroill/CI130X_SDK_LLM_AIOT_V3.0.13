@@ -1,6 +1,9 @@
 #include "user_config.h"
 #if SIMPLE_AUDIO_PLAYER_ENABLE
 #include <string.h>
+#if defined(__GNUC__)
+#include <malloc.h>
+#endif
 #include "user_config.h"
 #include "simple_audio_player.h"
 #include "FreeRTOS.h"
@@ -434,6 +437,25 @@ static void sap_send_msg(sap_msg_t *msg, BaseType_t *xHigherPriorityTaskWoken)
  * @param msg A pointer to a sap_msg_t structure used to input data address and callback function.
  * @return int 0:successed, not 0:failed.
  */
+/* The MP3 decoder (ROM MP3InitDecoder) allocates through newlib malloc, the
+ * heap shared with ASR; the PCM ring uses the FreeRTOS heap. Logged per local
+ * playback so a silent prompt can be attributed to the heap that ran out. */
+static void sap_log_heap(const char *stage, const char *fmt)
+{
+    extern int get_heap_bytes_remaining_size(void);
+    #if defined(__GNUC__)
+    struct mallinfo mi = mallinfo();
+    int asr_used = mi.uordblks;
+    int asr_free_chunks = mi.fordblks;
+    #else
+    int asr_used = -1;
+    int asr_free_chunks = -1;
+    #endif
+    mprintf("[LOCAL_PLAY] heap stage=%s fmt=%s asrHeapUsed=%d asrHeapFreeChunks=%d asrHeapUnclaimed=%d sysHeapFree=%u sysHeapMinFree=%u\r\n",
+        stage, fmt, asr_used, asr_free_chunks, get_heap_bytes_remaining_size(),
+        (unsigned int)xPortGetFreeHeapSize(), (unsigned int)xPortGetMinimumEverFreeHeapSize());
+}
+
 static int sap_start_play_inner(sap_msg_t *msg)
 {
     int ret = 0;
@@ -467,7 +489,16 @@ static int sap_start_play_inner(sap_msg_t *msg)
             (unsigned int)g_audio_play_pcm_gain_percent,
             (unsigned int)sap_info.gain_ratio_percent,
             ((unsigned int)g_audio_play_pcm_gain_percent * sap_info.gain_ratio_percent) / 25U);
+        sap_log_heap("before_decoder_init", msg->fmt);
         sap_info.decoder_handle = sap_info.cur_decoder->init();
+        if (NULL == sap_info.decoder_handle)
+        {
+            /* Previously unchecked: playback "started" with no decoder and
+             * produced zero samples, so the prompt was silently missing. */
+            sap_log_heap("decoder_init_failed", msg->fmt);
+            ret = -6;
+            break;
+        }
 
         src_data_info_t src_data_info = {
             .src_type = msg->src_type,
@@ -616,7 +647,14 @@ static int sap_start_play_inner(sap_msg_t *msg)
     // {
     //     vPortFree(tmp_buf);
     // }
-    mprintf("Play start\r\n");
+    if (0 == ret)
+    {
+        mprintf("Play start\r\n");
+    }
+    else
+    {
+        mprintf("[LOCAL_PLAY] start failed ret=%d\r\n", ret);
+    }
     return ret;
 }
 
