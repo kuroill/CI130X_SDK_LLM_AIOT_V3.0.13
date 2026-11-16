@@ -232,10 +232,11 @@ const aec_config_t aec_config =
 	.fft_size = 256,	   //频域处理频点数
 	/* These are PGA gains only; the board sets each preamp (MIC 12 dB, REF per
 	 * LENWELL_AEC_REF_WF0153). With the driver's 1.5 dB PGA steps, playback
-	 * MIC totals 19.5 dB; WF0153 REF totals 15 dB (V3.0.13 baseline), the
+	 * MIC totals 18 dB: at 19.5 dB its echo peaks reached full scale from 60%
+	 * volume. WF0153 REF totals 15 dB (V3.0.13 baseline), the
 	 * development board REF 0 dB. Ending AEC restores the original MIC pickup
 	 * gain; REF keeps its own gain and never inherits the MIC idle PGA. */
-	.alc_off_codec_adc_gain_mic = 8,
+	.alc_off_codec_adc_gain_mic = 6,
 #if LENWELL_AEC_REF_WF0153
     .alc_off_codec_adc_gain_ref = 4,
 #else

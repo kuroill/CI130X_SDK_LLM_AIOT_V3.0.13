@@ -196,8 +196,8 @@ MN-WF-0153 量产板的 AEC 参考取自 SPK+，经 R2 180K / R1 4.7K（约 −3
 [AUDIO_DIAG] version=6 ... ref_board=wf0153 ref_gain=front12db_aecpga4db_dig6db ...
 ```
 
-播放窗口的 `[AUDIO_GAIN]` 应为 `refPgaReg=0x6e`（空闲 0x6c），MIC 仍为
-`0x71/0x79`。BF24 验收：10%、60%、90% 音量各问长回复，播放进入稳定后
+播放窗口的 `[AUDIO_GAIN]` 应为 `refPgaReg=0x6e`（空闲 0x6c），MIC 为
+`0x70/0x79`（2026-11-16 起播放期 MIC PGA 降一档，8→6dB 配置值）。BF24 验收：10%、60%、90% 音量各问长回复，播放进入稳定后
 `[AEC_PATH]` 中 `refAbs` 与 `micAbs` 同一量级、`dstAbs` 明显低于 `micAbs`
 （目标 20dB 以上），`refClipPermille=0`；服务端不再出现无人说话的 `[BARGE]
 confirmed` 和自身回复被识别为 ASR final；近、远距离真人插话仍能打断。若 ref 仍

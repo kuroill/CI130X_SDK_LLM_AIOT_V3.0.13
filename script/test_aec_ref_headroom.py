@@ -87,9 +87,9 @@ int main(void) {
         uint32_t ref_playing = wf0153_ref ? 0x6e : 0x0c;
         assert(codec.pga_gain_reg[1] == ref_idle);
         for (int cycle = 0; cycle < 200; ++cycle) {
-            inner_codec_set_pga_gain(INNER_CODEC_LEFT_CHA, 8);
+            inner_codec_set_pga_gain(INNER_CODEC_LEFT_CHA, 6);
             inner_codec_set_pga_gain(INNER_CODEC_RIGHT_CHA, wf0153_ref ? 4 : 0);
-            assert(codec.pga_gain_reg[0] == 0x71); /* Existing playback MIC sensitivity. */
+            assert(codec.pga_gain_reg[0] == 0x70); /* Playback MIC: 12 dB front end + 6 dB PGA. */
             assert(codec.pga_gain_reg[1] == ref_playing); /* PGA writes keep the board front end. */
             inner_codec_set_pga_gain(INNER_CODEC_LEFT_CHA, 20);
             assert(codec.pga_gain_reg[0] == 0x79); /* Existing idle MIC sensitivity. */

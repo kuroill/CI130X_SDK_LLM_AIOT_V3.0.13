@@ -110,8 +110,8 @@ static void reset(int left_alc, int right_alc, int right_gain) {
 }
 
 static void assert_playing(bool right_is_ref) {
-    assert(gain[0] == 8);
-    assert(gain[1] == (right_is_ref ? REF_GAIN : 8));
+    assert(gain[0] == 6);
+    assert(gain[1] == (right_is_ref ? REF_GAIN : 6));
     assert(alc[0] == DISABLE && alc[1] == DISABLE);
 }
 
@@ -126,7 +126,7 @@ static void assert_stopped(bool right_is_ref, bool was_enabled) {
     } else {
         /* Preserve the existing single-MIC algorithm's non-REF right channel:
          * ending AEC does not enable or restore that channel. */
-        assert(gain[1] == 8 && alc[1] == DISABLE);
+        assert(gain[1] == 6 && alc[1] == DISABLE);
     }
 }
 
@@ -191,7 +191,7 @@ static void test_topology(int microphones, int references, bool right_is_ref) {
 }
 
 int main(void) {
-    assert(aec_config.alc_off_codec_adc_gain_mic == 8);
+    assert(aec_config.alc_off_codec_adc_gain_mic == 6);
     assert(aec_config.alc_off_codec_adc_gain_ref == REF_GAIN);
 '''
     # Expected physical topology is independent of the algorithm-buffer flag.
