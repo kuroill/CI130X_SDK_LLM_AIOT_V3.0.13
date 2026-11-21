@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 """Run actual CI wake C functions with host mocks, not a firmware build.
 
-The night quiet-wake policy (0x2A/0x1A) was removed on 2026-10-22: every wake
-reports WAKE_DETECTED and plays its ding, except while a conversation lease is
-active, where the ding is skipped without fabricating DING_DONE.
+Both initial and repeated wakes report WAKE_DETECTED and schedule one prompt.
 """
 from pathlib import Path
 
@@ -65,6 +63,7 @@ static uint16_t reported_id;
 static TickType_t xTaskGetTickCount(void) { return tick; }
 static void xSemaphoreTake(int m, unsigned t) { assert(!locked); locked=1; }
 static void xSemaphoreGive(int m) { assert(locked); locked=0; }
+
 static bool ai_uart_i2s_conversation_active(void) { return active; }
 static uint16_t cmd_info_get_command_id(int handle) { return (uint16_t)handle; }
 static int get_wakeup_state(void) { return state; }
@@ -84,10 +83,12 @@ static void send_msg_to_sys_task(sys_msg_t *msg, void *unused) {
   assert(msg->msg_data.cmd_info_data.cmd_info_status==MSG_CMD_INFO_STATUS_POST_CHANGE_ASR_NORMAL_WORD);
   ++resumed;
 }
-static void play_enter_wakeup_done_cb(int h) {}
-static void repeat_wakeup_ding_done_callback(int h) {}
+static void (*scheduled)(int);
+static void default_play_done_callback(int h) {}
+static int completions;
+static void ai_uart_i2s_on_ding_done(void) { ++completions; }
 static void prompt_play_by_voice_id(int id, void (*cb)(int), bool block) {
-  assert(id==WAKEUP_DING_VOICE_ID); ++ding;
+  assert(id==WAKEUP_DING_VOICE_ID && block && frames==ding+1 && !local_player); scheduled=cb; ++ding;
 }
 static void stop_downlink(void) { ++stops; }
 static int sap_get_state(void) { return local_player; }
@@ -102,6 +103,8 @@ static void send_uplink_ready(void) { ++uplink; }
 '''
     source += HEADER
     source += function(UART, "ai_uart_i2s_on_wake")
+    source += function(SYSTEM, "play_enter_wakeup_done_cb")
+    source += function(SYSTEM, "repeat_wakeup_ding_done_callback")
     source += function(SYSTEM, "enter_wakeup_deal")
     source += r'''
 int main(void) {
@@ -111,12 +114,18 @@ int main(void) {
   enter_wakeup_deal(15000, 0x1236);
   assert(last_event==AI_UART_MSG_WAKE_DETECTED && reported_id==0x1236);
   assert(ding==1 && frames==1 && stops==1 && uplink==1 && !locked);
-  /* Wake during an active conversation: still reported and interrupts, but no
-   * ding and no fabricated DING_DONE; ASR is resumed directly. */
-  active=1; enter_wakeup_deal(15000, 0x1237);
+  assert(scheduled==play_enter_wakeup_done_cb && completions==0);
+  scheduled(0); assert(completions==1 && resumed==1);
+  /* Repeated wake preempts playback and schedules exactly one local ding. */
+  active=1; local_player=1; enter_wakeup_deal(15000, 0x1237);
   assert(last_event==AI_UART_MSG_WAKE_DETECTED && reported_id==0x1237);
-  assert(ding==1 && frames==2 && stops==2 && resumed==1 && !locked);
-  puts("CI wake ding, active-conversation suppression and wake event regressions passed");
+  assert(ding==2 && frames==2 && stops==2 && uplink==2 && !locked);
+  assert(scheduled==play_enter_wakeup_done_cb && completions==1);
+  scheduled(0); assert(completions==2 && resumed==2);
+  active=0; enter_wakeup_deal(15000, 0x1238);
+  assert(ding==3 && scheduled==repeat_wakeup_ding_done_callback);
+  scheduled(0); assert(completions==3 && resumed==2);
+  puts("CI initial and repeated wake ding regressions passed");
 }
 '''
     run_fixture("wake_ding", source)

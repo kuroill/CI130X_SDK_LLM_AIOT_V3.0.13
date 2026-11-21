@@ -594,10 +594,8 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
 {
     xSemaphoreTake(WakeupMutex, portMAX_DELAY);
 
-    bool active_conversation = ai_uart_i2s_conversation_active();
     ai_uart_i2s_on_wake(cmd_info_get_command_id(cmd_handle));
 
-    /* A wake without its ding still leaves low power and restores the microphone path. */
     if(SYS_STATE_UNWAKEUP == get_wakeup_state())
     {
         #if (USE_LOWPOWER_OSC_FREQUENCY||USE_LOWPOWER_DOWN_FREQUENCY)
@@ -606,20 +604,6 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
         power_mode_switch(POWER_MODE_NORMAL);
         resume_asr();
         #endif
-    }
-    if(active_conversation)
-    {
-        /* Wake is still reported and preempts old playback. Do not fabricate
-         * DING_DONE: no prompt was played. Restore ASR without the ding callback. */
-        sys_msg_t resume_msg = {0};
-        resume_msg.msg_type = SYS_MSG_TYPE_CMD_INFO;
-        resume_msg.msg_data.cmd_info_data.cmd_info_status = MSG_CMD_INFO_STATUS_POST_CHANGE_ASR_NORMAL_WORD;
-        set_state_enter_wakeup(exit_wakup_ms);
-        sys_weakup_hook();
-        xSemaphoreGive(WakeupMutex);
-        send_msg_to_sys_task(&resume_msg, NULL);
-        mprintf("[WAKE] wake reported; ding suppressed reason=active_conversation\r\n");
-        return;
     }
 
     //if(cmd_handle != INVALID_HANDLE)
@@ -633,10 +617,12 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
         if(vpr_status == 2)
         #endif
         {
+            /* A live ESP conversation also restores the normal ASR network
+             * from the real ding completion callback. */
             #if USE_CWSL
-            if(SYS_STATE_UNWAKEUP == get_wakeup_state() || ciss_get(CI_SS_START_SLEEP_PROCESS) == 1)    //AEC打断退出唤醒播报时,CI_SS_START_SLEEP_PROCESS要置0
+            if(ai_uart_i2s_conversation_active() || SYS_STATE_UNWAKEUP == get_wakeup_state() || ciss_get(CI_SS_START_SLEEP_PROCESS) == 1)    //AEC打断退出唤醒播报时,CI_SS_START_SLEEP_PROCESS要置0
             #else
-            if(SYS_STATE_UNWAKEUP == get_wakeup_state())
+            if(ai_uart_i2s_conversation_active() || SYS_STATE_UNWAKEUP == get_wakeup_state())
             #endif
             {
                 #if PLAY_ENTER_WAKEUP_EN && !WMAN_PLAY_EN

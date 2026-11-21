@@ -66,9 +66,7 @@ ownership 回归执行实际 C 函数，覆盖同帧等待后继续播放、旧 
 
 ## 唤醒提示音
 
-每次唤醒都发送 `0x10 WAKE_DETECTED` 并播放 ding；仅在 ESP 续约的对话租约
-（`SET_CONVERSATION_STATE` active/waiting）有效时跳过 ding，仍打断旧播放、恢复识别，
-不伪造 DING_DONE。原夜间静音唤醒（`0x2A SET_WAKE_PROMPT_POLICY`、
+每次语音唤醒都打断旧播放、发送 `0x10 WAKE_DETECTED` 并播放一次本地 ding，播放完成回调发送 `DING_DONE`。原夜间静音唤醒（`0x2A SET_WAKE_PROMPT_POLICY`、
 `0x1A QUIET_WAKE_DETECTED`）已于 2026-10-22 移除，类型值保留不复用；旧 ESP 若仍发送
 `0x2A`，CI 按未知命令回 UNSUPPORTED，因此需先升级 ESP 再升级 CI。
 
@@ -273,7 +271,7 @@ CI 本地唤醒 ding（`voice_id=1000`）的 PCM 增益调整为当前 ESP 对�
 唤醒音为 10%；ESP 内置播报的 50% 比例由 ESP 固件另行实现，两端都需用户更新。
 实机先在 1、50、100 档分别唤醒再听正常回复；CI 应出现 `[AUDIO] local playback
 volume`、`gainRatioPercent=50`（50 档时 `pcmGainPermille=100`），ESP 内置播报看
-`firmware prompt playback started` 的同一比例。会话内重复唤醒的 ding 抑制规则保留；
+`firmware prompt playback started` 的同一比例。会话内重复唤醒使用同一 ding；
 完整响度、安静播放、真人打断与下一轮恢复仍需实机验证。
 
 ESP 内置播报与 AI 回复反复爆音的现场原因尚未确认。诊断代码在现有下行 owner
