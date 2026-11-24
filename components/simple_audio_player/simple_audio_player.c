@@ -84,6 +84,7 @@ typedef struct
     uint32_t diagnostic_pcm_samples;
     uint32_t diagnostic_pcm_peak;
     uint32_t diagnostic_pcm_clipped;
+    bool flash_prompt_eof;
     // uint32_t source_frame_size;
     uint32_t frame_pcm_size;
     // uint32_t total_pcm_size;
@@ -135,7 +136,7 @@ static audio_pa_state_t audio_pa_state = AUDIO_PA_STATE_UNKNOWN;
  * PCM plus the +10 dB DAC digital gain stays below clipping. */
 #define ESP_VOLUME_TO_LOCAL_PROMPT_DENOMINATOR 25000
 #define ESP_VOLUME_LINEAR_LIMIT_PERCENT 60U
-#define ESP_VOLUME_MAX_PCM_LEVEL 78U
+#define ESP_VOLUME_MAX_PCM_LEVEL 64U // 与 ESP SPEAKER_VOLUME_MAX_PCM_LEVEL 一致；2026-11-24 由 78 下调，100% 音量回声削顶
 
 #if (PLAYBACK_DAC_DIGITAL_GAIN_DB < -117) || (PLAYBACK_DAC_DIGITAL_GAIN_DB > 10)
 #error "PLAYBACK_DAC_DIGITAL_GAIN_DB must be in the CI1306 DAC range [-117, 10] dB"
@@ -199,6 +200,11 @@ int sap_play_stream(const char *audio_fmt, uint32_t fetcher_buffer_size, uint32_
             .data_request_callback = (SAP_PLAY_DATA_REQUEST_CALLBACK)data_request_callback,
         };
     sap_send_msg(&msg, NULL);
+}
+
+bool sap_flash_prompt_completed(void)
+{
+    return sap_info.flash_prompt_eof && sap_info.decode_frame_count >= 3 && sap_info.diagnostic_pcm_peak > 0;
 }
 
 sap_status_t sap_get_state(void)
@@ -450,6 +456,9 @@ static void sap_log_heap(const char *stage, const char *fmt)
 static int sap_start_play_inner(sap_msg_t *msg)
 {
     int ret = 0;
+    sap_info.flash_prompt_eof = false;
+    sap_info.play_end_callback = msg->play_end_callback;
+    src_type = msg->src_type;
     sap_info.diagnostic_pcm_samples = 0;
     sap_info.diagnostic_pcm_peak = 0;
     sap_info.diagnostic_pcm_clipped = 0;
@@ -473,7 +482,6 @@ static int sap_start_play_inner(sap_msg_t *msg)
             break;
         }
         // sap_info.data_addr = msg->data_addr;
-        sap_info.play_end_callback = msg->play_end_callback;
         sap_info.gain_ratio_percent = msg->gain_ratio_percent;
         mprintf("[AUDIO] local playback volume userPercent=%u pcmLevel=%u gainRatioPercent=%u pcmGainPermille=%u\r\n",
             (unsigned int)g_audio_play_user_percent,
@@ -501,7 +509,6 @@ static int sap_start_play_inner(sap_msg_t *msg)
             .request_block_size = msg->request_block_size,
             .data_request_callback = msg->data_request_callback,
         };
-        src_type = msg->src_type;
         if(pdf_init(&src_data_info))
         {
             ret = -1;
@@ -851,15 +858,19 @@ static int sap_stop_play_inner(int32_t play_cb_state)
     cm_set_codec_mute(PLAY_CODEC_ID, CODEC_OUTPUT, 3, ENABLE);
     cm_stop_codec(PLAY_CODEC_ID, CODEC_OUTPUT);
     cm_report_output_diagnostics(PLAY_CODEC_ID, "local");
-    mprintf("[LOCAL_PCM] samples=%lu peak=%lu clippedSamples=%lu gainRatioPercent=%u dacAnalogCode=%u dacDigitalCode=%u\r\n",
+    mprintf("[LOCAL_PCM] samples=%lu peak=%lu clippedSamples=%lu gainRatioPercent=%u dacAnalogCode=%u dacDigitalCode=%u endStatus=%ld flashCompleted=%u\r\n",
         (unsigned long)sap_info.diagnostic_pcm_samples,
         (unsigned long)sap_info.diagnostic_pcm_peak,
         (unsigned long)sap_info.diagnostic_pcm_clipped,
         (unsigned int)sap_info.gain_ratio_percent,
         (unsigned int)(CODEC->reg2d & 0x1fU),
-        (unsigned int)(CODEC->reg6 & 0xffU));
-    sap_info.cur_decoder->deinit(sap_info.decoder_handle);
-    sap_info.decoder_handle = NULL;
+        (unsigned int)(CODEC->reg6 & 0xffU), (long)play_cb_state,
+        (unsigned int)sap_flash_prompt_completed());
+    if (sap_info.cur_decoder && sap_info.decoder_handle)
+    {
+        sap_info.cur_decoder->deinit(sap_info.decoder_handle);
+        sap_info.decoder_handle = NULL;
+    }
     if (sap_info.pcm_buffer != NULL)
     {
         // mprintf("vPortFree\r\n");
@@ -969,6 +980,10 @@ static void task_simple_audio_player(void *pvParameters)
                 {
                     ci_logdebug(LOG_AUDIO_PLAY, "end err %d\n", rst);
                     sap_info.state = SAP_STATE_STOPPING;
+                    /* Codec starts on frame three. Only a natural EOF after output can
+                     * acknowledge a voice ID. Preserve queue progression for other
+                     * prompts, including a silent segment in a combination. */
+                    sap_info.flash_prompt_eof = src_type == SAP_DATA_SRC_FLASH && rst == 3;
                     sap_stop_play_inner(0);
                     // mprintf("SAP_STATE_IDLE3\r\n");
                     sap_info.state = SAP_STATE_IDLE;

@@ -108,6 +108,9 @@ extern uint32_t prompt_play_by_cmd_string(
  * @param preemptive Whether to interrupt the current playback.
  * @return uint32_t 0:sucessful, nonzero: failed.
  */
+/* Optional project hook for a naturally completed simple-player voice ID. */
+void prompt_on_voice_id_played(uint16_t voice_id);
+
 extern uint32_t prompt_play_by_voice_id(uint16_t voice_id, play_done_callback_t play_done_callback, bool preemptive);
 
 /**

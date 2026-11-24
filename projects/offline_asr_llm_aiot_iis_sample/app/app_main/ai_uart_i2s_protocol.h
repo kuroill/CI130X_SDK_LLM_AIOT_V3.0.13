@@ -25,5 +25,7 @@ void ai_uart_i2s_handle_downlink_fault(uint32_t generation);
 bool ai_uart_i2s_conversation_active(void);
 void ai_uart_i2s_on_wake(uint16_t wake_id);
 void ai_uart_i2s_on_ding_done(void);
+/* Non-wake command recognized while awake; ESP decides any local action. */
+void ai_uart_i2s_on_command(uint16_t command_id, uint8_t score);
 
 #endif

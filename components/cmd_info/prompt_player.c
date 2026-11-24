@@ -91,6 +91,11 @@ bool check_combination_index_state(void)
     else
     return false;
 }
+__attribute__((weak)) void prompt_on_voice_id_played(uint16_t voice_id)
+{
+    (void)voice_id;
+}
+
 static void combination_callback(int32_t play_cb_state);
 
 static void pop_from_play_queue()
@@ -208,6 +213,10 @@ static int prompt_play_inner(voice_play_info_t *p_voice_play_info, bool from_cal
 static void combination_callback(int32_t play_cb_state)
 {
     voice_play_info_t voice_play_info;
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+    bool voice_id_completed = false;
+    uint16_t completed_id = 0;
+#endif
     
     if (prompt_player.semaphore)
     {
@@ -237,6 +246,13 @@ static void combination_callback(int32_t play_cb_state)
         BaseType_t rst = xQueueReceive(prompt_player.play_queue, &voice_play_info, 0);
         if (pdTRUE == rst)
         {
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+            if (play_cb_state == 0 && voice_play_info.select_index == -2 && sap_flash_prompt_completed())
+            {
+                voice_id_completed = true;
+                completed_id = (uint16_t)(uintptr_t)voice_play_info.cmd_handle;
+            }
+#endif
             resume_asr();
             if (voice_play_info.play_done_callback)     
             {                
@@ -280,6 +296,12 @@ static void combination_callback(int32_t play_cb_state)
     {
         xSemaphoreGive(prompt_player.semaphore);
     }
+#if SIMPLE_AUDIO_PLAYER_ENABLE
+    if (voice_id_completed)
+    {
+        prompt_on_voice_id_played(completed_id);
+    }
+#endif
 }
 
 

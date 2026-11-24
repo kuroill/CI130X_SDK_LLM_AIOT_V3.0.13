@@ -1,0 +1,55 @@
+# 启英平台「语言模型开发」基础版命令词
+# 芯片 CI1306 / 英文 / 智能中控
+# 声学模型：须与固件 [0]G3-GE-EN-S-V02484.fefixbin146 同版本（V02484）
+# 语言模型类型：命令词合成语言模型（固定词条）
+# 读法变体与吸收词放到后续「分词优化」，这里不加
+# 退出词语义标签统一 16（= 命令表语义 ID 0x0010）；平台若不允许重复，改为逐个编号并同步命令表
+
+## 唤醒模型 → [1]lm_english_CI1306_V02484.dat（命令表 <1>wake 页），共 2 行
+语义标签	命令词	命令词类型
+1	VITANA	唤醒词
+2	HI-VITANA	唤醒词
+
+## 命令词模型 → [0]lm_english_CI1306_V02484.dat（命令表 <0>cmd 页），共 23 行
+语义标签	命令词	命令词类型
+1	VITANA	唤醒词
+2	HI-VITANA	唤醒词
+16	GOODBYE	命令词
+16	BYE	命令词
+16	BYE-BYE	命令词
+16	SEE-YOU	命令词
+16	SEE-YOU-LATER	命令词
+16	TALK-TO-YOU-LATER	命令词
+16	THAT-IS-ALL	命令词
+16	STOP-LISTENING	命令词
+16	EXIT	命令词
+16	END-CONVERSATION	命令词
+16	ZAI-JEN	命令词
+16	TUI-CHU	命令词
+16	MING-TIAN-JEN	命令词
+16	GUN-DAN	命令词
+16	ADIOS	命令词
+16	HASTA-LUEGO	命令词
+16	CHAO	命令词
+16	NOS-VEMOS	命令词
+16	HASTA-MANANA	命令词
+16	SALIR	命令词
+16	HASTA-PRONTO	命令词
+
+## 负性词（两个模型都加在表尾；语义标签平台若要求必填，填 99）
+# 只放和 VITANA 音近的真实单词，不放 NOW/WAY/WAIT/LIKE 这类日常高频短词
+99	DIANA	负性词
+99	VIENNA	负性词
+99	BANANA	负性词
+99	VITAMIN	负性词
+99	VITAL	负性词
+99	WANNA	负性词
+99	BEATEN	负性词
+99	BOTANICAL	负性词
+99	BUCHANAN	负性词
+# 退出词暂不加负性词：BYE 与 BY/BUY 同音，负性词区分不了，靠阈值与特殊词计数控制
+
+## 说明
+# BYE-BYE 同时覆盖中文“拜拜”；ZAI-JEN=再见，TUI-CHU=退出，MING-TIAN-JEN=明天见，GUN-DAN=滚蛋
+# HASTA-MANANA=hasta mañana，SALIR=退出，HASTA-PRONTO=回头见
+# 生成后把 .dat 交回核对 <AC-MODEL> 版本与输出词表

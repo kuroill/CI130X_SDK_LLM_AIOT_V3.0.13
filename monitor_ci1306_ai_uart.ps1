@@ -90,12 +90,6 @@ function PrintFrame([byte[]]$Frame) {
     else { Write-Host "[$ts] $name seq=$seq len=$len | $hex" }
 }
 
-Write-Host "CI1303/CI1306 AI UART monitor"
-Write-Host "Port=$Port Baud=$Baud  Read-only. Close PACK_UPDATE_TOOL serial window before use."
-Write-Host "Looking for frames: A5 5A 04 TYPE SEQ LEN_L LEN_H payload CRC8"
-Write-Host "Press Ctrl+C to stop."
-Write-Host ""
-
 $sp = New-Object System.IO.Ports.SerialPort $Port, $Baud, ([System.IO.Ports.Parity]::None), 8, ([System.IO.Ports.StopBits]::One)
 $sp.ReadTimeout = 200
 $sp.WriteTimeout = 200
@@ -108,10 +102,27 @@ $len = 0
 $text = New-Object System.Text.StringBuilder
 
 try {
+    Write-Host "CI1303/CI1306 AI UART monitor"
+    Write-Host "Opened $Port Baud=$Baud  Read-only. Close PACK_UPDATE_TOOL serial window before use."
+    Write-Host "Looking for frames: A5 5A 04 TYPE SEQ LEN_L LEN_H payload CRC8"
+    Write-Host "Press Ctrl+C to stop."
+    Write-Host ""
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    $received = $false
     while ($true) {
-        try { $v = $sp.ReadByte() } catch [TimeoutException] { continue }
+        try { $v = $sp.ReadByte() } catch [TimeoutException] {
+            if (!$received -and $wait.IsRunning -and $wait.Elapsed.TotalSeconds -ge 5) {
+                Write-Host "[RX] No bytes received in the first 5 seconds. Still listening."
+                $wait.Stop()
+            }
+            continue
+        }
         if ($v -lt 0) { continue }
         [byte]$b = $v
+        if (!$received) {
+            $received = $true
+            Write-Host ("[RX] First byte: {0:X2}" -f $b)
+        }
 
         switch ($state) {
             0 {

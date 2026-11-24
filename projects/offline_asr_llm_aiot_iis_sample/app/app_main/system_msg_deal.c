@@ -498,13 +498,14 @@ void play_enter_wakeup_done_cb(cmd_handle_t cmd_handle)
     send_msg.msg_type = SYS_MSG_TYPE_CMD_INFO;
     send_msg.msg_data.cmd_info_data.cmd_info_status = MSG_CMD_INFO_STATUS_POST_CHANGE_ASR_NORMAL_WORD;
     send_msg_to_sys_task(&send_msg, NULL);
-    ai_uart_i2s_on_ding_done();
 }
 
-static void repeat_wakeup_ding_done_callback(cmd_handle_t cmd_handle)
+void prompt_on_voice_id_played(uint16_t voice_id)
 {
-    default_play_done_callback(cmd_handle);
-    ai_uart_i2s_on_ding_done();
+    if (voice_id == WAKEUP_DING_VOICE_ID)
+    {
+        ai_uart_i2s_on_ding_done();
+    }
 }
 
 
@@ -634,9 +635,9 @@ void enter_wakeup_deal(uint32_t exit_wakup_ms, cmd_handle_t cmd_handle )
             else
             {
                 #if PLAY_ENTER_WAKEUP_EN && !WMAN_PLAY_EN
-                prompt_play_by_voice_id(WAKEUP_DING_VOICE_ID, repeat_wakeup_ding_done_callback, true);
+                prompt_play_by_voice_id(WAKEUP_DING_VOICE_ID, default_play_done_callback, true);
                 #else
-                repeat_wakeup_ding_done_callback(cmd_handle);
+                default_play_done_callback(cmd_handle);
                 #endif
             }
         }
@@ -924,6 +925,11 @@ void sys_deal_asr_msg(sys_msg_asr_data_t *asr_msg)
 
             uint32_t semantic_id = cmd_info_get_semantic_id(cmd_handle);
             uint16_t cmd_id = cmd_info_get_command_id(cmd_handle);
+            if (cmd_handle != weakup_asr_hander)
+            {
+                short score = asr_msg->asr_score;
+                ai_uart_i2s_on_command(cmd_id, (uint8_t)((score < 0) ? 0 : ((score > 255) ? 255 : score)));
+            }
 #if !UPLOAD_PCM_DATA_ENABLE
             uint8_t cmd_id_buf[2] = {0};
             cmd_id_buf[0]= (cmd_id & 0xff);
@@ -1058,6 +1064,11 @@ void sys_deal_asr_msg(sys_msg_asr_data_t *asr_msg)
             #endif
             uint32_t semantic_id = cmd_info_get_semantic_id(cmd_handle);
             uint16_t cmd_id = cmd_info_get_command_id(cmd_handle);
+            if (cmd_handle != weakup_asr_hander)
+            {
+                short score = asr_msg->asr_score;
+                ai_uart_i2s_on_command(cmd_id, (uint8_t)((score < 0) ? 0 : ((score > 255) ? 255 : score)));
+            }
 #if !UPLOAD_PCM_DATA_ENABLE
             uint8_t cmd_id_buf[2] = {0};
             cmd_id_buf[0]= (cmd_id & 0xff);

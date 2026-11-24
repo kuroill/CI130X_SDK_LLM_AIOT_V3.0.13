@@ -1233,3 +1233,10 @@ void ai_uart_i2s_on_ding_done(void)
 {
     send_frame(AI_UART_MSG_DING_DONE, NULL, 0);
 }
+
+void ai_uart_i2s_on_command(uint16_t command_id, uint8_t score)
+{
+    /* Forward only; downlink and wake state stay with ESP's conversation owner. */
+    uint8_t payload[3] = {(uint8_t)(command_id & 0xff), (uint8_t)(command_id >> 8), score};
+    send_frame(CI_COMMAND_DETECTED_MESSAGE, payload, sizeof(payload));
+}

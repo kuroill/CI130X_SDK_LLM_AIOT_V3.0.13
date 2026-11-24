@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include "ci130x_system.h"
 #define PCM_FRAME_SIZE          (512)
-#define SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT 60U
+#define SAP_DEFAULT_PROMPT_GAIN_RATIO_PERCENT 100U
 typedef enum
 {
     SAP_DATA_SRC_FLASH,         /*!< 从FLASH读取源数据 */
@@ -99,6 +99,8 @@ int sap_play_stream(const char* audio_fmt, uint32_t fetcher_buffer_size, uint32_
  * @brief 获取播放器当前的工作状态.
  */
 sap_status_t sap_get_state(void);
+/* Valid on the simple player task during the completion callback. */
+bool sap_flash_prompt_completed(void);
 
 /**
  * @breif 停止播放, 同步接口,会阻塞调用线程,直到播放停止完成。
